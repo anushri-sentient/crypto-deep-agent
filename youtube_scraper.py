@@ -1,226 +1,233 @@
+import os
 import logging
 import requests
 import datetime
-import os
-import csv
 import time
+import re
+import subprocess
+
+import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
-# --- YouTube API Setup ---
+# Your API keys (set as environment variables for security)
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-print(YOUTUBE_API_KEY)
-if not YOUTUBE_API_KEY:
-    logging.warning("YouTube API key not set. Set the YOUTUBE_API_KEY environment variable.")
-else:
-    logging.info("YouTube API key set.")
-    print(YOUTUBE_API_KEY)
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-YOUTUBE_SEARCH_URL = 'https://www.googleapis.com/youtube/v3/search'
-
-# --- Search Parameters ---
-QUERIES = [
-    'best stable-coin yields',
-    'top DeFi yields',
-    'best stablecoin APY',
-    'top DeFi APY',
-]
-CHAINS = ['Ethereum', 'Arbitrum', 'Optimism', 'Base', 'Polygon', 'Solana']
-REPUTABLE_CHANNELS = {'DeFi Dojo', 'The Defiant', 'Bankless', 'Finematics'}
-MAX_RESULTS = 10
-MONTHS_LOOKBACK = 3
-
-# --- LLM Extraction ---
+# Gemini LLM import (optional, only if you have google-generativeai installed)
 try:
     import google.generativeai as genai
-    from youtube_transcript_api import YouTubeTranscriptApi
 except ImportError:
     genai = None
-    YouTubeTranscriptApi = None
-    logging.warning("google-generativeai or youtube_transcript_api not installed. Gemini LLM extraction will not work.")
+    logging.warning("google-generativeai not installed. Gemini LLM analysis will be skipped.")
 
-# --- Helper Functions ---
+# --- Settings ---
+MAX_VIDEOS = 1
+LANG = 'en'
+
+# Helper to get ISO date string N months ago
 def get_recent_date_iso(months=3):
     today = datetime.datetime.utcnow()
     delta = datetime.timedelta(days=30*months)
-    print(today - delta)
     return (today - delta).isoformat("T") + "Z"
 
-def search_youtube(query, published_after):
-    if YOUTUBE_API_KEY == 'YOUR_YOUTUBE_API_KEY_HERE':
-        logging.warning("No YouTube API key set. Please set YOUTUBE_API_KEY as an environment variable.")
-        return []
-    params = {
-        'part': 'snippet',
-        'q': query,
-        'type': 'video',
-        'maxResults': MAX_RESULTS,
-        'order': 'date',
-        'publishedAfter': published_after,
-        'key': YOUTUBE_API_KEY
-    }
-    try:
-        resp = requests.get(YOUTUBE_SEARCH_URL, params=params)
-        resp.raise_for_status()
-        return resp.json().get('items', [])
-    except Exception as e:
-        logging.error(f"YouTube API error for query '{query}': {e}")
-        return []
+# Clean subtitle text from VTT format (remove timestamps and metadata)
+def clean_subtitle_text(sub_text):
+    lines = sub_text.splitlines()
+    filtered = []
+    for line in lines:
+        if re.match(r"^\d{2}:\d{2}:\d{2}\.\d{3} -->", line):
+            continue
+        if line.strip() == "" or line.startswith("WEBVTT"):
+            continue
+        filtered.append(line.strip())
+    return " ".join(filtered)
 
-def get_transcript(video_id, max_chars=1000, max_retries=3):
-    if not YouTubeTranscriptApi:
-        return ''
-    delay = 2
-    for attempt in range(1, max_retries + 1):
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            full_text = ' '.join([t['text'] for t in transcript])
-            return full_text[:max_chars]
-        except Exception as e:
-            if '429' in str(e) or 'Too Many Requests' in str(e):
-                logging.warning(f"429 Too Many Requests for {video_id}, attempt {attempt}/{max_retries}. Retrying in {delay} seconds...")
-                time.sleep(delay)
-                delay *= 2  # Exponential backoff
+# Fetch subtitles using yt-dlp
+def get_subtitles_yt_dlp(video_url, lang=LANG):
+    ydl_opts = {
+        'skip_download': True,
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': [lang],
+        'quiet': True,
+        'forcejson': True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            subs = info.get('subtitles') or info.get('automatic_captions')
+            if subs and lang in subs:
+                sub_url = subs[lang][0]['url']
+                resp = requests.get(sub_url)
+                # Check if response is HTML error page
+                if "html" in resp.headers.get('Content-Type', '') or "<html" in resp.text.lower():
+                    logging.warning(f"Subtitle URL returned HTML for {video_url}")
+                    return ''
+                cleaned = clean_subtitle_text(resp.text)
+                if not cleaned.strip():
+                    logging.warning(f"Subtitle text empty after cleaning for {video_url}")
+                    return ''
+                return cleaned
             else:
-                logging.warning(f"No transcript for {video_id}: {e}")
-                break
-    logging.error(f"Failed to retrieve transcript for {video_id} after {max_retries} attempts.")
+                logging.warning(f"No subtitles found for {video_url}")
+                return ''
+    except Exception as e:
+        logging.error(f"Error getting subtitles for {video_url}: {e}")
+        return ''
+
+# Fallback: get transcript with youtube-transcript-api
+def get_transcript_youtube_api(video_id):
+    try:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[LANG])
+        return " ".join([t['text'] for t in transcript_list])
+    except TranscriptsDisabled:
+        logging.warning(f"Transcripts disabled for video {video_id}")
+    except Exception as e:
+        logging.warning(f"Error fetching transcript via YouTube API for {video_id}: {e}")
     return ''
 
-def list_gemini_models(api_key):
-    if not genai:
-        print("google-generativeai not installed.")
-        return []
-    genai.configure(api_key=api_key)
-    models = list(genai.list_models())
-    for m in models:
-        print(f"Model: {m.name}, Supported methods: {m.supported_generation_methods}")
-    return models
-
-def get_gemini_generation_model(api_key):
-    models = list_gemini_models(api_key)
-    # Prefer the latest recommended models
-    preferred = [
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-flash-latest',
-        'models/gemini-1.5-pro-latest',
-        'models/gemini-1.5-pro',
-    ]
-    for p in preferred:
-        for m in models:
-            if m.name == p and 'generateContent' in m.supported_generation_methods:
-                print(f"Using preferred Gemini model: {m.name}")
-                return m.name
-    # Otherwise, pick the first non-deprecated model with generateContent and not vision
-    for m in models:
-        if 'generateContent' in m.supported_generation_methods and 'vision' not in m.name.lower():
-            print(f"Using Gemini model: {m.name}")
-            return m.name
-    print("No suitable Gemini model found. Please check your API access.")
-    return None
-
+# Gemini LLM extraction
 def extract_deFi_insights_with_gemini(transcript, api_key, model_name="models/gemini-1.5-flash"):
+    if not genai:
+        logging.error("Gemini LLM library not installed.")
+        return "Gemini LLM not available."
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
     prompt = (
-        "You're analyzing a transcript from a DeFi-focused video. Your task is to extract useful insights related to stablecoin yields, DeFi protocols, and yield strategies.\n\n"
-        "Please extract and present the following:\n"
-        "1. **Coins**: List all cryptocurrency coins or tokens mentioned (e.g., USDC, ETH, SOL).\n"
-        "2. **Protocols**: List any DeFi protocols or platforms referenced (e.g., Aave, Kamino, Marginfi).\n"
-        "3. **Strategies**: Summarize any interesting or novel stablecoin yield strategies discussed.\n"
-        "4. **Watchlist Additions**: Suggest any protocols, platforms, or strategies that should be considered for inclusion in a stablecoin yield farming watchlist.\n\n"
-        "Format your response clearly under each heading.\n\n"
+        "You're analyzing a transcript from a DeFi-focused video. Extract useful insights about stablecoin yields, DeFi protocols, and yield strategies.\n\n"
+        "1. Coins mentioned\n"
+        "2. Protocols/platforms\n"
+        "3. Yield strategies summarized\n"
+        "4. Watchlist suggestions\n\n"
         f"Transcript:\n\n{transcript}"
     )
     response = model.generate_content(prompt)
     return response.text.strip() if hasattr(response, 'text') else str(response)
 
-def run_youtube_scraper():
-    published_after = get_recent_date_iso(MONTHS_LOOKBACK)
-    found_protocols = set()
+# --- AssemblyAI transcript extraction ---
+def get_transcript_assemblyai(video_url, api_key, lang='en'):
+    # Download audio
+    filename = f"{video_url.split('=')[-1]}.mp3"
+    command = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', filename, video_url]
+    subprocess.run(command, check=True)
+    transcript = ''
+    try:
+        # Upload to AssemblyAI
+        headers = {'authorization': api_key}
+        with open(filename, 'rb') as f:
+            response = requests.post('https://api.assemblyai.com/v2/upload', headers=headers, files={'file': f})
+        upload_url = response.json().get('upload_url')
+        if not upload_url:
+            return ''
+        # Request transcription
+        endpoint = 'https://api.assemblyai.com/v2/transcript'
+        json_data = {
+            "audio_url": upload_url,
+            "language_code": lang
+        }
+        headers = {'authorization': api_key, 'content-type': 'application/json'}
+        response = requests.post(endpoint, json=json_data, headers=headers)
+        resp_json = response.json()
+        transcript_id = resp_json.get('id')
+        if not transcript_id:
+            return ''
+        # Poll until complete
+        endpoint = f'https://api.assemblyai.com/v2/transcript/{transcript_id}'
+        headers = {'authorization': api_key}
+        for _ in range(60):  # up to 5 minutes
+            poll_resp = requests.get(endpoint, headers=headers).json()
+            if poll_resp['status'] == 'completed':
+                transcript = poll_resp['text']
+                break
+            elif poll_resp['status'] == 'error':
+                return ''
+            time.sleep(5)
+        return transcript
+    finally:
+        # Always try to delete the mp3 file
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except Exception as e:
+            logging.warning(f"Could not delete temporary mp3 file {filename}: {e}")
+
+# Main runner
+def run_scraper():
+    from googleapiclient.discovery import build
+
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    published_after = get_recent_date_iso(3)
+    query = 'best stable-coin yields'
+
+    search_response = youtube.search().list(
+        q=query,
+        part='snippet',
+        type='video',
+        maxResults=MAX_VIDEOS,
+        order='date',
+        publishedAfter=published_after
+    ).execute()
+
+    videos = search_response.get('items', [])
     results = []
-    analysis_outputs = []
-    logging.info("Searching YouTube for recent DeFi yield videos...")
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    gemini_model_name = None
-    video_count = 0
-    MAX_VIDEOS = 5
-    for base_query in QUERIES:
-        for chain in CHAINS:
-            if video_count >= MAX_VIDEOS:
-                break
-            query = f"{base_query} {chain}"
-            videos = search_youtube(query, published_after)
-            for v in videos:
-                if video_count >= MAX_VIDEOS:
-                    break
-                snippet = v['snippet']
-                title = snippet['title']
-                channel = snippet['channelTitle']
-                published = snippet['publishedAt']
-                video_id = v['id']['videoId']
-                url = f"https://youtube.com/watch?v={video_id}"
-                is_reputable = channel in REPUTABLE_CHANNELS
-                protocols = [word for word in title.split() if word[0].isupper() and len(word) > 2]
-                for p in protocols:
-                    found_protocols.add(p)
-                results.append({
-                    'title': title,
-                    'channel': channel,
-                    'published': published,
-                    'url': url,
-                    'reputable': is_reputable,
-                    'protocols': ', '.join(protocols)
-                })
-                # --- Gemini LLM DeFi analysis for each video ---
-                print(f"\nFetching transcript and analyzing with Gemini LLM for video: {title} ({url})")
-                transcript = get_transcript(video_id, max_chars=2000)
-                if transcript:
-                    analysis = extract_deFi_insights_with_gemini(transcript, gemini_api_key, gemini_model_name)
-                    print(f"\n"); print(f"Gemini Analysis Output for {title}:\n{analysis}\n")
-                    analysis_outputs.append({
-                        'title': title,
-                        'url': url,
-                        'analysis': analysis
-                    })
-                else:
-                    print(f"No transcript available for this video: {title}")
-                video_count += 1
-            if video_count >= MAX_VIDEOS:
-                break
-        if video_count >= MAX_VIDEOS:
-            break
-    # Save results to text file
-    with open('youtube_yield_candidates.txt', 'w', encoding='utf-8') as f:
-        for r in results:
-            rep = 'REPUTABLE' if r['reputable'] else 'other'
-            f.write(f"[{rep}] {r['title']} | {r['channel']} | {r['published']} | {r['url']} | Protocols: {r['protocols']}\n")
-    # Save analysis outputs to a file
-    with open('youtube_gemini_analysis.txt', 'w', encoding='utf-8') as f:
-        for a in analysis_outputs:
-            f.write(f"Video: {a['title']}\nURL: {a['url']}\nAnalysis:\n{a['analysis']}\n\n{'-'*60}\n\n")
-    # Summarize all outputs using Gemini
-    if analysis_outputs:
-        print("doing summary")
-        all_analyses = '\n\n'.join([a['analysis'] for a in analysis_outputs])
-        summary_prompt = (
-            "You are an expert DeFi analyst. Given the following analyses of several DeFi YouTube videos, "
-            "summarize the most important coins, protocols, strategies, and watchlist suggestions. "
-            "Highlight any recurring themes or especially promising opportunities.\n\n"
-            f"Analyses:\n\n{all_analyses}"
-        )
-        summary = extract_deFi_insights_with_gemini(summary_prompt, gemini_api_key, gemini_model_name)
-        print("\n================ SUMMARY OF ALL VIDEOS ================\n")
-        print(summary)
-        with open('youtube_gemini_summary.txt', 'w', encoding='utf-8') as f:
-            f.write(summary)
-    else:
-        print("No analysis outputs to summarize.")
-    return results, analysis_outputs
+    analyses = []
+
+    for v in videos:
+        video_id = v['id']['videoId']
+        title = v['snippet']['title']
+        channel = v['snippet']['channelTitle']
+        url = f"https://youtube.com/watch?v={video_id}"
+        print(f"\nGetting transcript and analyzing: {title}")
+
+        transcript = get_transcript_assemblyai(url, os.getenv('ASSEMBLYAI_API_KEY'), lang=LANG)
+
+        if not transcript:
+            print(f"No transcript available for video: {title}")
+            analyses.append({'title': title, 'url': url, 'analysis': 'No transcript available.'})
+            continue
+
+        # Gemini analysis (if API key set)
+        if GEMINI_API_KEY:
+            analysis = extract_deFi_insights_with_gemini(transcript, GEMINI_API_KEY)
+        else:
+            analysis = "No Gemini API key set; skipping analysis."
+
+        print(f"Gemini Analysis for {title}:\n{analysis}")
+        analyses.append({'title': title, 'url': url, 'analysis': analysis})
+
+        results.append({'title': title, 'channel': channel, 'url': url})
+
+    return results, analyses
+
 
 def main():
-    run_youtube_scraper()
+    if not YOUTUBE_API_KEY:
+        logging.error("Missing YouTube API key. Please set YOUTUBE_API_KEY environment variable.")
+        return
+    if not GEMINI_API_KEY:
+        logging.warning("No Gemini API key found. Analysis steps will be skipped.")
+
+    results, analyses = run_scraper()
+
+    # Save results & analyses to file
+    with open('video_results.txt', 'w', encoding='utf-8') as f:
+        for r in results:
+            f.write(f"{r['title']} | {r['channel']} | {r['url']}\n")
+
+    with open('video_analyses.txt', 'w', encoding='utf-8') as f:
+        for a in analyses:
+            f.write(f"Video: {a['title']}\nURL: {a['url']}\nAnalysis:\n{a['analysis']}\n\n{'-'*60}\n\n")
+
+def run_youtube_scraper():
+    """Wrapper for Streamlit app compatibility. Also validates pools from the watchlist."""
+    from validate_watchlist_llama import run_watchlist_validation
+    results, analyses = run_scraper()
+    _, valid_pools_structured = run_watchlist_validation()
+    return results, analyses, valid_pools_structured
 
 if __name__ == "__main__":
-    main() 
+    main()

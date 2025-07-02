@@ -45,6 +45,13 @@ python stablecoin_yield_pipeline.py
 ```
 This will execute all four steps and generate output files in the `output/` directory.
 
+## Streamlit Demo
+To run the Streamlit demo for YouTube Scraper and Bluechip Landscape:
+```bash
+streamlit run demo_app.py
+```
+You will be able to select between the YouTube Scraper and Bluechip Landscape demos in the sidebar.
+
 ## Output Files (in `output/` directory)
 - **filtered_protocols.csv**: All filtered DeFi protocols (blue-chip landscape)
 - **evaluated_stablecoin_pools.csv**: All scored/tagged stablecoin pools with risk/yield assessment
