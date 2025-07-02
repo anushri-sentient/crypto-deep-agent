@@ -63,3 +63,5 @@ config.json
 *.db
 cache/
 temp/
+*.csv
+*.txt
