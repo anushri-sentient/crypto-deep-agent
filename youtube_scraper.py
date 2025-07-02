@@ -6,7 +6,6 @@ import time
 import re
 import subprocess
 
-import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 # Configure logging
@@ -44,40 +43,6 @@ def clean_subtitle_text(sub_text):
             continue
         filtered.append(line.strip())
     return " ".join(filtered)
-
-# Fetch subtitles using yt-dlp
-def get_subtitles_yt_dlp(video_url, lang=LANG):
-    ydl_opts = {
-        'skip_download': True,
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': [lang],
-        'quiet': True,
-        'forcejson': True,
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            subs = info.get('subtitles') or info.get('automatic_captions')
-            if subs and lang in subs:
-                sub_url = subs[lang][0]['url']
-                resp = requests.get(sub_url)
-                # Check if response is HTML error page
-                if "html" in resp.headers.get('Content-Type', '') or "<html" in resp.text.lower():
-                    logging.warning(f"Subtitle URL returned HTML for {video_url}")
-                    return ''
-                cleaned = clean_subtitle_text(resp.text)
-                if not cleaned.strip():
-                    logging.warning(f"Subtitle text empty after cleaning for {video_url}")
-                    return ''
-                return cleaned
-            else:
-                logging.warning(f"No subtitles found for {video_url}")
-                return ''
-    except Exception as e:
-        logging.error(f"Error getting subtitles for {video_url}: {e}")
-        return ''
 
 # Fallback: get transcript with youtube-transcript-api
 def get_transcript_youtube_api(video_id):
