@@ -6,6 +6,7 @@ import time
 import re
 import subprocess
 
+import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 # Configure logging

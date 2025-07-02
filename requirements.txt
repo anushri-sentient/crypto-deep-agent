@@ -5,3 +5,4 @@ youtube-transcript-api>=0.6.1
 streamlit>=1.32.0
 pandas>=1.5.0
 praw>=7.7.1
+yt-dlp>=2024.4.9
