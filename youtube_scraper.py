@@ -24,7 +24,7 @@ except ImportError:
     logging.warning("google-generativeai not installed. Gemini LLM analysis will be skipped.")
 
 # --- Settings ---
-MAX_VIDEOS = 1
+MAX_VIDEOS = 2
 LANG = 'en'
 
 # Helper to get ISO date string N months ago

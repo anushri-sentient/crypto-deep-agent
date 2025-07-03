@@ -64,4 +64,3 @@ config.json
 cache/
 temp/
 *.csv
-*.txt

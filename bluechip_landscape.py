@@ -2,6 +2,7 @@ import requests
 import logging
 import csv
 import time
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -44,7 +45,15 @@ def filter_protocols(protocols):
             "slug": slug,
             "category": category,
             "chains": list(protocol_chains & CHAINS),
-            "tvl": protocol.get("tvl", 0)
+            "tvl": protocol.get("tvl", 0),
+            "date_checked": datetime.utcnow().strftime('%Y-%m-%d'),
+            "protocol_age_months": None,  # stub
+            "audit_status": "unknown",  # stub
+            "website": protocol.get("url", ""),
+            "docs": "",  # stub
+            "defillama_link": f"https://defillama.com/protocol/{slug}" if slug else "",
+            "trending": False,  # stub
+            "last_validated": datetime.utcnow().strftime('%Y-%m-%d')
         })
     logging.info(f"{len(filtered)} protocols matched.")
     return filtered
@@ -79,6 +88,27 @@ def tag_pool(apr, risk):
         return "Moderate Risk / Moderate Yield"
     else:
         return "Low Yield / Stable"
+
+def risk_score(quality, risk, apr):
+    # Simple rubric: lower is safer
+    score = 0
+    if 'Tier 1' in quality:
+        score += 0
+    elif 'Tier 2' in quality:
+        score += 1
+    else:
+        score += 2
+    if 'Low Risk' in risk:
+        score += 0
+    elif 'Medium Risk' in risk:
+        score += 1
+    else:
+        score += 2
+    if apr > 10:
+        score += 2
+    elif apr > 5:
+        score += 1
+    return score
 
 # --- Fetch Yield Pools ---
 def fetch_yield_pools():
@@ -115,13 +145,8 @@ def evaluate_yield_stablecoin_pools(filtered_protocols):
         tag = tag_pool(apr, risk)
         chain = pool.get("chain", "unknown")
         category = pool.get("poolMeta", "unknown")
-
-        # Log each evaluated pool
-        # logging.info(
-        #     f"Protocol: {protocol:15} | Coin: {coin_name:20} | Chain: {chain:10} | Stablecoin: {stable:6} | "
-        #     f"APR: {apr:.2f}% | Quality: {quality:40} | Risk: {risk:35} | Tag: {tag}"
-        # )
-
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        # Add new fields
         results.append({
             "protocol": protocol,
             "coin_name": coin_name,
@@ -131,9 +156,20 @@ def evaluate_yield_stablecoin_pools(filtered_protocols):
             "apr_%": apr,
             "quality": quality,
             "risk": risk,
-            "tag": tag
+            "tag": tag,
+            "date_checked": today,
+            "tvl": pool.get("tvl", None),
+            "protocol_age_months": None,  # stub
+            "audit_status": "unknown",  # stub
+            "source_of_yield": category,
+            "notes": "",
+            "website": "",  # stub
+            "docs": "",  # stub
+            "defillama_link": f"https://defillama.com/protocol/{protocol}" if protocol else "",
+            "trending": False,  # stub
+            "risk_score": risk_score(quality, risk, apr),
+            "last_validated": today
         })
-
     logging.info(f"Evaluated {len(results)} stablecoin pools from yield API.")
     return results
 
