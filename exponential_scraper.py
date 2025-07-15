@@ -3,17 +3,54 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import re
 import requests
+import subprocess
+import sys
+import os
+
+def setup_playwright():
+    """Ensure Playwright browsers are installed."""
+    try:
+        # Check if browsers are already installed
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        print("✅ Playwright browsers are already installed")
+        return True
+    except Exception as e:
+        print(f"⚠️ Playwright browsers not found: {e}")
+        print("🔧 Installing Playwright browsers...")
+        try:
+            subprocess.run([
+                sys.executable, "-m", "playwright", "install", "chromium"
+            ], check=True, capture_output=True)
+            print("✅ Playwright browsers installed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install Playwright browsers: {e}")
+            return False
 
 def scrape_exponential_pools_by_risk():
+    # Ensure Playwright is set up
+    if not setup_playwright():
+        print("❌ Cannot proceed without Playwright browsers")
+        return pd.DataFrame()
+    
     url = "https://exponential.fi/pools/search?assets=USDC&assets=USDT&assets=DAI&assets=TUSD&assets=LUSD&assets=GUSD&assets=sUSD&assets=MIM&assets=alUSD&risk=A&risk=B&blockchains=Ethereum&blockchains=Optimism&blockchains=Base&blockchains=Polygon&blockchains=Solana&blockchains=Arbitrum"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        # Wait for pool rows to load
-        page.wait_for_selector("tr", timeout=20000)
-        html = page.content()
-        browser.close()
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle")
+            # Wait for pool rows to load
+            page.wait_for_selector("tr", timeout=20000)
+            html = page.content()
+            browser.close()
+    except Exception as e:
+        print(f"❌ Error during scraping: {e}")
+        return pd.DataFrame()
+    
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:

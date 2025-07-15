@@ -10,3 +10,4 @@ google-api-python-client>=2.0.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 playwright>=1.40.0
+beautifulsoup4>=4.9.0
