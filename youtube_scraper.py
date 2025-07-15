@@ -24,14 +24,125 @@ except ImportError:
     logging.warning("google-generativeai not installed. Gemini LLM analysis will be skipped.")
 
 # --- Settings ---
-MAX_VIDEOS = 2
+MAX_VIDEOS = 1  # Increased to show more options
 LANG = 'en'
+
+# Curated YouTuber list with channel IDs
+CURATED_YOUTUBERS = {
+    "Stephen TCG | DeFi Dojo": {
+        "channel_id": None,  # Will be searched by name
+        "url": "https://www.youtube.com/@TheCalculatorGuy",
+        "search_terms": ["TheCalculatorGuy", "Stephen TCG", "DeFi Dojo"]
+    },
+    "CryptoLabs Research | Defi Passive Income | Crypto": {
+        "channel_id": None,  # Will be searched by name
+        "url": "https://www.youtube.com/@CryptolabsResearch",
+        "search_terms": ["CryptolabsResearch", "CryptoLabs Research"]
+    },
+    "Jake Call | DeFi Income": {
+        "channel_id": None,  # Will be searched by name
+        "url": "https://www.youtube.com/@jakeacall.",
+        "search_terms": ["jakeacall", "Jake Call"]
+    },
+    "TokenGuy": {
+        "channel_id": None,  # Will be searched by name
+        "url": "https://www.youtube.com/@TokenGuySol",
+        "search_terms": ["TokenGuySol", "TokenGuy"]
+    }
+}
 
 # Helper to get ISO date string N months ago
 def get_recent_date_iso(months=3):
     today = datetime.datetime.utcnow()
     delta = datetime.timedelta(days=30*months)
     return (today - delta).isoformat("T") + "Z"
+
+# Get channel ID from URL
+def get_channel_id_from_url(url):
+    """Extract channel ID from YouTube URL"""
+    try:
+        # For @username format, we need to make an API call to get channel ID
+        if '@' in url:
+            username = url.split('@')[1].split('/')[0]
+            # This would require an API call to convert username to channel ID
+            # For now, return None and we'll handle it in the main function
+            return None
+        return None
+    except Exception as e:
+        logging.warning(f"Could not extract channel ID from {url}: {e}")
+        return None
+
+# Fetch videos from specific channels
+def fetch_channel_videos(youtube, channel_id, max_results=10):
+    """Fetch recent videos from a specific channel"""
+    try:
+        # Get channel's uploads playlist
+        channels_response = youtube.channels().list(
+            id=channel_id,
+            part='contentDetails'
+        ).execute()
+        
+        if not channels_response.get('items'):
+            return []
+            
+        uploads_playlist_id = channels_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        
+        # Get videos from uploads playlist
+        playlist_response = youtube.playlistItems().list(
+            playlistId=uploads_playlist_id,
+            part='snippet',
+            maxResults=max_results
+        ).execute()
+        
+        videos = []
+        for item in playlist_response.get('items', []):
+            video_id = item['snippet']['resourceId']['videoId']
+            title = item['snippet']['title']
+            description = item['snippet']['description']
+            published_at = item['snippet']['publishedAt']
+            thumbnail_url = item['snippet']['thumbnails']['medium']['url']
+            
+            videos.append({
+                'video_id': video_id,
+                'title': title,
+                'description': description,
+                'published_at': published_at,
+                'thumbnail_url': thumbnail_url,
+                'url': f"https://youtube.com/watch?v={video_id}"
+            })
+        
+        return videos
+    except Exception as e:
+        logging.error(f"Error fetching videos from channel {channel_id}: {e}")
+        return []
+
+# Display video options with thumbnails
+def display_video_options(videos):
+    """Display videos with thumbnails and return user selection"""
+    print("\n" + "="*80)
+    print("AVAILABLE VIDEOS FOR ANALYSIS")
+    print("="*80)
+    
+    for i, video in enumerate(videos, 1):
+        print(f"\n{i}. {video['title']}")
+        print(f"   Published: {video['published_at'][:10]}")
+        print(f"   URL: {video['url']}")
+        print(f"   Thumbnail: {video['thumbnail_url']}")
+        print(f"   Description: {video['description'][:100]}...")
+        print("-" * 80)
+    
+    print(f"\nEnter video numbers to analyze (comma-separated, e.g., 1,3,5) or 'all' for all videos:")
+    selection = input().strip()
+    
+    if selection.lower() == 'all':
+        return list(range(len(videos)))
+    
+    try:
+        selected_indices = [int(x.strip()) - 1 for x in selection.split(',')]
+        return [i for i in selected_indices if 0 <= i < len(videos)]
+    except ValueError:
+        print("Invalid selection. Please enter numbers separated by commas.")
+        return []
 
 # Clean subtitle text from VTT format (remove timestamps and metadata)
 def clean_subtitle_text(sub_text):
@@ -121,7 +232,121 @@ def get_transcript_assemblyai(video_url, api_key, lang='en'):
         except Exception as e:
             logging.warning(f"Could not delete temporary mp3 file {filename}: {e}")
 
-# Main runner
+# Main runner with channel selection
+def run_scraper_with_channels():
+    from googleapiclient.discovery import build
+
+    youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    
+    print("\n" + "="*60)
+    print("CURATED DEFI YOUTUBERS")
+    print("="*60)
+    
+    for i, (name, info) in enumerate(CURATED_YOUTUBERS.items(), 1):
+        print(f"{i}. {name}")
+        print(f"   URL: {info['url']}")
+    
+    print(f"\nEnter YouTuber numbers to search (comma-separated, e.g., 1,3) or 'all' for all:")
+    youtuber_selection = input().strip()
+    
+    if youtuber_selection.lower() == 'all':
+        selected_youtubers = list(CURATED_YOUTUBERS.items())
+    else:
+        try:
+            selected_indices = [int(x.strip()) - 1 for x in youtuber_selection.split(',')]
+            selected_youtubers = [list(CURATED_YOUTUBERS.items())[i] for i in selected_indices if 0 <= i < len(CURATED_YOUTUBERS)]
+        except (ValueError, IndexError):
+            print("Invalid selection. Using all YouTubers.")
+            selected_youtubers = list(CURATED_YOUTUBERS.items())
+    
+    all_videos = []
+    
+    # Search for videos from these channels using their names and search terms
+    for name, info in selected_youtubers:
+        print(f"\nSearching for videos from: {name}")
+        
+        # Use search terms to find videos from this channel
+        search_terms = info.get('search_terms', [name])
+        for term in search_terms:
+            search_response = youtube.search().list(
+                q=f"{term} stablecoin yield defi",
+                part='snippet',
+                type='video',
+                maxResults=MAX_VIDEOS,
+                order='date',
+                publishedAfter=get_recent_date_iso(3)
+            ).execute()
+        
+        videos = search_response.get('items', [])
+        for v in videos:
+            video_id = v['id']['videoId']
+            title = v['snippet']['title']
+            channel = v['snippet']['channelTitle']
+            published_at = v['snippet']['publishedAt']
+            thumbnail_url = v['snippet']['thumbnails']['medium']['url']
+            description = v['snippet']['description']
+            url = f"https://youtube.com/watch?v={video_id}"
+            
+            all_videos.append({
+                'video_id': video_id,
+                'title': title,
+                'channel': channel,
+                'published_at': published_at,
+                'thumbnail_url': thumbnail_url,
+                'description': description,
+                'url': url
+            })
+    
+    if not all_videos:
+        print("No videos found from selected channels.")
+        return [], []
+    
+    # Remove duplicates based on video_id
+    unique_videos = []
+    seen_ids = set()
+    for video in all_videos:
+        if video['video_id'] not in seen_ids:
+            unique_videos.append(video)
+            seen_ids.add(video['video_id'])
+    
+    # Display options and get user selection
+    selected_indices = display_video_options(unique_videos)
+    selected_videos = [unique_videos[i] for i in selected_indices if 0 <= i < len(unique_videos)]
+    
+    if not selected_videos:
+        print("No videos selected for analysis.")
+        return [], []
+    
+    results = []
+    analyses = []
+
+    for video in selected_videos:
+        video_id = video['video_id']
+        title = video['title']
+        url = video['url']
+        print(f"\nGetting transcript and analyzing: {title}")
+
+        transcript = get_transcript_assemblyai(url, os.getenv('ASSEMBLYAI_API_KEY'), lang=LANG)
+
+        if not transcript:
+            print(f"No transcript available for video: {title}")
+            analyses.append({'title': title, 'url': url, 'analysis': 'No transcript available.'})
+            continue
+
+        # Gemini analysis (if API key set)
+        if GEMINI_API_KEY:
+            analysis = extract_deFi_insights_with_gemini(transcript, GEMINI_API_KEY)
+        else:
+            analysis = "No Gemini API key set; skipping analysis."
+
+        print(f"Gemini Analysis for {title}:\n{analysis}")
+        analyses.append({'title': title, 'url': url, 'analysis': analysis})
+
+        results.append({'title': title, 'channel': video['channel'], 'url': url})
+
+    return results, analyses
+
+# Original search-based runner (kept for compatibility)
 def run_scraper():
     from googleapiclient.discovery import build
 
@@ -177,7 +402,16 @@ def main():
     if not GEMINI_API_KEY:
         logging.warning("No Gemini API key found. Analysis steps will be skipped.")
 
-    results, analyses = run_scraper()
+    print("Choose scraping method:")
+    print("1. Search-based (original)")
+    print("2. Curated YouTubers (new)")
+    
+    choice = input("Enter choice (1 or 2): ").strip()
+    
+    if choice == "2":
+        results, analyses = run_scraper_with_channels()
+    else:
+        results, analyses = run_scraper()
 
     # Save results & analyses to file
     with open('video_results.txt', 'w', encoding='utf-8') as f:

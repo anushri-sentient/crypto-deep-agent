@@ -18,7 +18,7 @@ def search_newest_crypto_reddit(config, logger, stock_symbols, financial_keyword
         headers['Authorization'] = f'bearer {token}'
 
         # Example crypto-related subreddits — adjust config.reddit_subreddits accordingly if you want
-        crypto_subreddits = ['CryptoCurrency', 'defi', 'ethfinance', 'bitcoin']
+        crypto_subreddits = ['CryptoCurrency', 'defi', 'ethfinance', 'bitcoin','CryptoMoonShots']
 
         for subreddit in crypto_subreddits:
             url = f'https://oauth.reddit.com/r/{subreddit}/new'  # 'new' sorting
