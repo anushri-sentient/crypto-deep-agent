@@ -84,11 +84,25 @@ def scrape_euler_strategies():
         page = browser.new_page()
 
         page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"})
-        page.goto("https://app.euler.finance/strategies?collateralAsset=DAI%2CUSDT%2CUSDC&asset=USDT%2CDAI%2CUSDC&network=ethereum", wait_until="networkidle")
+        url = "https://app.euler.finance/strategies?collateralAsset=DAI%2CUSDT%2CUSDC&asset=USDT%2CDAI%2CUSDC&network=ethereum"
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            html = page.content()
+            print("Failed to load page. HTML content (first 1000 chars):")
+            print(html[:1000])
+            raise
+
         page.wait_for_selector("div.asCards.MuiBox-root.css-1253gju", timeout=30000)
 
         cards_container = page.query_selector("div.asCards.MuiBox-root.css-1253gju")
+        if not cards_container:
+            print("Warning: No cards_container found!")
+            return []
         strategy_divs = cards_container.query_selector_all("div.MuiBox-root.css-1oarypt")
+        if not strategy_divs:
+            print("Warning: No strategy_divs found!")
+            return []
 
         data = []
         for div in strategy_divs:
