@@ -6,6 +6,8 @@ from youtube_scraper import run_youtube_scraper, extract_deFi_insights_with_gemi
 from bluechip_landscape import run_bluechip_landscape
 from crypto_reddit_analyzer import analyze_reddit_urls  # import your analysis function
 from playwright.sync_api import sync_playwright
+import subprocess
+import sys
 
 # Helper function for DataFrame display, available to all sections
 def show_df(df, caption=None):
@@ -77,8 +79,31 @@ def display_video_with_thumbnail(video, index):
     
     return st.checkbox(f"Select video {index + 1}", key=f"video_{index}")
 
+def setup_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        print("✅ Playwright browsers are already installed")
+        return True
+    except Exception as e:
+        print(f"⚠️ Playwright browsers not found: {e}")
+        print("🔧 Installing Playwright browsers...")
+        try:
+            subprocess.run([
+                sys.executable, "-m", "playwright", "install", "chromium"
+            ], check=True, capture_output=True)
+            print("✅ Playwright browsers installed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install Playwright browsers: {e}")
+            return False
+
 def scrape_euler_strategies():
-    """Scrape Euler Finance strategies from their web app"""
+    if not setup_playwright():
+        print("❌ Cannot proceed without Playwright browsers")
+        return []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
