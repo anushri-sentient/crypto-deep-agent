@@ -95,15 +95,17 @@ def scrape_euler_strategies():
             text = div.inner_text().strip()
             lines = text.split('\n')
 
-            # Heuristic parsing based on observed format:
+            # Defensive: avoid index errors
             strategy = {
-                "name": lines[0],  # e.g. Euler Prime
-                "tokens": lines[1],  # e.g. cbBTC / WBTC
+                "name": lines[0] if len(lines) > 0 else "",
+                "tokens": lines[1] if len(lines) > 1 else "",
                 "max_roe": None,
                 "max_multiplier": None,
                 "correlated": None,
                 "liquidity": None,
             }
+            if len(lines) < 2:
+                print(f"Warning: Unexpected card format, lines: {lines}")
 
             # Find max ROE value (next line after "Max ROE")
             try:
@@ -639,9 +641,12 @@ elif demo_type == "Euler Strategies":
                         else:
                             st.warning("No Gemini API key set. Please set GEMINI_API_KEY environment variable.")
                 
+            except ModuleNotFoundError as e:
+                st.error(f"Playwright not installed: {e}")
+                st.info("Make sure you have Playwright installed: `pip install playwright` and run `playwright install chromium`")
             except Exception as e:
                 st.error(f"Error scraping Euler strategies: {e}")
-                st.info("Make sure you have Playwright installed: `pip install playwright` and run `playwright install chromium`")
+                st.info("This is likely a parsing or data error, not a Playwright error.")
     else:
         # Try to load from session state if available
         if 'euler_strategies' in st.session_state:
