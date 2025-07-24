@@ -159,7 +159,6 @@ def classify_pool(pool):
     # 8. Final catch-all
     return "Other"
 
-   
 def setup_playwright():
     try:
         from playwright.sync_api import sync_playwright
@@ -168,17 +167,17 @@ def setup_playwright():
             browser.close()
         print("✅ Playwright browsers are already installed")
         return True
+
     except Exception as e:
-        print(f"⚠️ Playwright browsers not found: {e}")
-        print("🔧 Installing Playwright browsers...")
+        print(f"⚠️ Playwright browsers not found or failed to launch: {e}")
+        print("🔧 Installing Playwright dependencies and browsers...")
         try:
-            subprocess.run([
-                sys.executable, "-m", "playwright", "install", "chromium"
-            ], check=True, capture_output=True)
-            print("✅ Playwright browsers installed successfully")
+            subprocess.run(["playwright", "install-deps"], check=True)
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            print("✅ Playwright setup completed successfully")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install Playwright browsers: {e}")
+            print(f"❌ Failed to install Playwright dependencies or browsers:\n{e}")
             return False
 
 def normalize_query(query):

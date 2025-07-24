@@ -129,7 +129,17 @@ async def crawl_pool_url_async(pool_url):
         return result.cleaned_html
 
 def crawl_pool_url(pool_url):
-    return asyncio.run(crawl_pool_url_async(pool_url))
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_running():
+        # Streamlit case
+        return asyncio.ensure_future(crawl_pool_url_async(pool_url))
+    else:
+        return loop.run_until_complete(crawl_pool_url_async(pool_url))
+
 
 def gemini_summarize_html(crawled_content, pool_name=""):
     print("Crawled content for summarization:", crawled_content)

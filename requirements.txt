@@ -17,4 +17,5 @@ asyncio>=3.4.3
 openai>=0.27.0
 google-auth>=2.0.0
 google-auth-oauthlib>=0.4.0
-google-api-core>=2.0.0     
+google-api-core>=2.0.0 
+playwright    
