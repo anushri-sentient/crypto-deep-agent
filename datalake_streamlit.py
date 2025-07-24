@@ -16,6 +16,8 @@ import requests
 from dotenv import load_dotenv
 import openai
 import json
+import subprocess
+from playwright.sync_api import sync_playwright
 
 # NEW: Import modules for report generation and utilities
 import report_generator as rg
@@ -158,7 +160,26 @@ def classify_pool(pool):
     return "Other"
 
    
-
+def setup_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+        print("✅ Playwright browsers are already installed")
+        return True
+    except Exception as e:
+        print(f"⚠️ Playwright browsers not found: {e}")
+        print("🔧 Installing Playwright browsers...")
+        try:
+            subprocess.run([
+                sys.executable, "-m", "playwright", "install", "chromium"
+            ], check=True, capture_output=True)
+            print("✅ Playwright browsers installed successfully")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Failed to install Playwright browsers: {e}")
+            return False
 
 def normalize_query(query):
     """Normalize and expand query with synonyms and common aliases"""
@@ -827,4 +848,5 @@ Welcome to the DeFi Yield Explorer! Enter your DeFi yield question in plain Engl
 
 
 if __name__ == "__main__":
+    setup_playwright()
     main()
