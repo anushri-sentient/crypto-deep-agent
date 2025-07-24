@@ -170,15 +170,17 @@ def setup_playwright():
 
     except Exception as e:
         print(f"⚠️ Playwright browsers not found or failed to launch: {e}")
-        print("🔧 Installing Playwright dependencies and browsers...")
+        print("🔧 Installing Playwright browsers...")
         try:
-            subprocess.run(["playwright", "install-deps"], check=True)
-            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-            print("✅ Playwright setup completed successfully")
+            subprocess.run([
+                sys.executable, "-m", "playwright", "install", "chromium"
+            ], check=True)
+            print("✅ Playwright browsers installed successfully")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to install Playwright dependencies or browsers:\n{e}")
+            print(f"❌ Failed to install Playwright browsers: {e}")
             return False
+
 
 def normalize_query(query):
     """Normalize and expand query with synonyms and common aliases"""
