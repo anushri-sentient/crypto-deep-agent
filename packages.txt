@@ -13,4 +13,3 @@ libgbm1
 libpango-1.0-0
 libcairo2
 libasound2
-crawl4ai
