@@ -690,10 +690,6 @@ def display_selectable_pool_results(pools_to_display, key_suffix=""):
             if not st.session_state.selected_pools_for_report:
                 st.error("No pools selected for report generation. Please select at least one pool.")
             else:
-                st.subheader("Raw Data for Selected Pools (Passed to AI Agent)")
-                st.json(st.session_state.selected_pools_for_report)
-                st.markdown("---")
-
                 with st.spinner("Collecting detailed context and generating AI report... This may take a while. (Approx. 30-60 seconds per pool)"):
                     full_contexts = []
                     for pool in st.session_state.selected_pools_for_report:
