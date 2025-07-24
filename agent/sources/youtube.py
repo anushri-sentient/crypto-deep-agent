@@ -101,3 +101,52 @@ def get_influencer_videos(api_key, channel_ids, max_results=5, logger=None):
                 logger.error(f"Error fetching videos for channel {channel_id}: {e}")
             continue
     return all_videos
+
+def search_youtube_videos(config, logger, query, max_results=10):
+    """
+    Search YouTube for videos matching the query.
+    Args:
+        config: Config object with API key and region.
+        logger: Logger for debug/info output.
+        query (str): The search query.
+        max_results (int): Number of results to fetch.
+    Returns:
+        list: List of video dicts with id, title, description, publishedAt, channel, url, and source.
+    """
+    if not config.youtube_api_key:
+        logger.warning("YouTube API key not provided")
+        return []
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        'part': 'snippet',
+        'q': query,
+        'type': 'video',
+        'regionCode': getattr(config, 'youtube_region_code', 'US'),
+        'maxResults': max_results,
+        'key': config.youtube_api_key
+    }
+    logger.info(f"YouTube search params: {params}")
+    try:
+        response = requests.get(url, params=params)
+        logger.info(f"YouTube API response status: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"YouTube API error response: {response.text}")
+            return []
+        data = response.json()
+        videos = []
+        for item in data.get("items", []):
+            video = {
+                "id": item["id"]["videoId"],
+                "title": item["snippet"]["title"],
+                "description": item["snippet"].get("description", ""),
+                "publishedAt": item["snippet"].get("publishedAt"),
+                "channel": item["snippet"].get("channelTitle"),
+                "url": f"https://www.youtube.com/watch?v={item['id']['videoId']}",
+                "source": "YouTube"
+            }
+            videos.append(video)
+        logger.info(f"YouTube search returned {len(videos)} videos")
+        return videos
+    except Exception as e:
+        logger.error(f"Error searching YouTube: {e}")
+        return []
