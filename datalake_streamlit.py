@@ -330,8 +330,8 @@ Input: Show me pools with no impermanent loss
 Output: {{{{"chain": null, "token": null, "apy_min": null, "apy_max": null, "risk_level": "no", "stablecoin": null, "exposure": null, "project": null, "trending": null}}}}
 Input: Show me trending Aave pools
 Output: {{{{"chain": null, "token": null, "apy_min": null, "apy_max": null, "risk_level": null, "stablecoin": null, "exposure": null, "project": "aave", "trending": true}}}}
-Input: find stable yield farming on polygon
-Output: {{{{"chain": "Polygon", "token": null, "apy_min": null, "apy_max": null, "risk_level": "no", "stablecoin": true, "exposure": "multi", "project": null, "trending": null}}}}
+Input: find pools on polygon
+Output: {{{{"chain": "Polygon", "token": null, "apy_min": null, "apy_max": null, "risk_level": null, "stablecoin": null, "exposure": null, "project": null, "trending": null}}}}
 Input: Show me liquid staking derivatives
 Output: {{{{"chain": null, "token": null, "apy_min": null, "apy_max": null, "risk_level": null, "stablecoin": null, "exposure": "single", "project": null, "trending": null}}}}
 Input: Show me money market pools
