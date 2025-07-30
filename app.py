@@ -11,6 +11,7 @@ import openai
 import re
 from crawler import summarize_pool_info
 import subprocess
+import sys
 
 # Configuration
 logging.basicConfig(level=logging.INFO)
