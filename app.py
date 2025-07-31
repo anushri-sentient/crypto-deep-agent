@@ -9,9 +9,10 @@ from dotenv import load_dotenv
 import os
 import openai
 import re
-from crawler import summarize_pool_info
+from report import generate_pool_analysis  # Updated import
 import subprocess
 import sys
+from optimizer import create_portfolio_optimizer
 
 # Configuration
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +23,8 @@ DEFILLAMA_POOLS_API = "https://yields.llama.fi/pools"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+NANSEN_API_KEY = os.getenv("NANSEN_API_KEY")
+NANSEN_API_BASE_URL = "https://api.nansen.ai/api/beta"
 
 ALLOWED_PROJECTS = [
     "pendle", "compound-v3", "compound-v2", "beefy", "aave-v3", "aave-v2",
@@ -89,6 +92,24 @@ def load_custom_css():
         box-shadow: 0 4px 15px rgba(0,0,0,0.05);
     }
 
+    .comprehensive-report {
+        background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        border-left: 4px solid #f59e0b;
+        margin: 1rem 0;
+        box-shadow: 0 4px 15px rgba(245, 158, 11, 0.1);
+    }
+
+    .breakdown-report {
+        background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        border-left: 4px solid #3b82f6;
+        margin: 1rem 0;
+        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.1);
+    }
+
     .strategy-badge {
         display: inline-block;
         padding: 0.5rem 1rem;
@@ -100,6 +121,14 @@ def load_custom_css():
         letter-spacing: 0.5px;
     }
 
+    .report-type-selector {
+        background: white;
+        padding: 1rem;
+        border-radius: 15px;
+        border: 2px solid #e5e7eb;
+        margin: 1rem 0;
+    }
+
     .badge-staking { background: #dbeafe; color: #1e40af; }
     .badge-lending { background: #dcfce7; color: #166534; }
     .badge-farming { background: #fef3c7; color: #92400e; }
@@ -107,7 +136,7 @@ def load_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
-# Classification Functions
+# Classification Functions (keeping existing functions)
 def classify_pool_type(pool):
     """Classify the pool type based on project and symbol"""
     name = pool.get("pool", "").lower()
@@ -127,6 +156,7 @@ def classify_pool_type(pool):
     if pool.get("apy", 0) > 30 or pool.get("tvlUsd", 0) < 500_000:
         return "High-Risk Farm"
     return "Other"
+
 def setup_playwright():
     try:
         from playwright.sync_api import sync_playwright
@@ -135,7 +165,6 @@ def setup_playwright():
             browser.close()
         print("✅ Playwright browsers are already installed")
         return True
-
     except Exception as e:
         print(f"⚠️ Playwright browsers not found or failed to launch: {e}")
         print("🔧 Installing Playwright browsers...")
@@ -192,13 +221,12 @@ def is_valid_pool(pool):
         return False
     if tvl < 500_000 or apy > 100 or apy < 0.5:
         return False
-    # Check for unsustainable APY spikes
     if apy_30d and apy_30d > 0 and (apy_7d / apy_30d > 4):
         return False
     return True
 
-def score_pool(pool): # Simplified scoring for initial filtering
-    """Score a pool for ranking (used for initial selection for LLM)"""
+def score_pool(pool):
+    """Score a pool for ranking"""
     tvl = pool.get("tvlUsd", 0)
     apy = pool.get("apy", 0)
     risk_level = classify_risk(pool)
@@ -208,12 +236,11 @@ def score_pool(pool): # Simplified scoring for initial filtering
         score = tvl * 0.0001 + apy * 10
     elif risk_level == "Medium":
         score = tvl * 0.00005 + apy * 20
-    else: # High
+    else:
         score = tvl * 0.00001 + apy * 30
     return score
 
-
-# Data Fetching Functions
+# Data Fetching Functions (keeping existing functions)
 @st.cache_data(ttl=300)
 def fetch_coingecko_token_data(token_id):
     """Fetch token data from CoinGecko API"""
@@ -250,6 +277,7 @@ def fetch_coingecko_token_data(token_id):
         history_data = history_response.json()
 
         return {
+            "coin_id": coin_id,
             "token_data": token_data,
             "price_history": history_data
         }
@@ -288,10 +316,7 @@ def fetch_yield_opportunities(token):
 
 @st.cache_data(ttl=900)
 def get_news_summary(token, pools=None):
-    """
-    Get news summary using EXA API with chain and project context.
-    Returns both a formatted string for display and raw news data for AI.
-    """
+    """Get news summary using EXA API"""
     if not EXA_API_KEY:
         return "EXA API key missing for news analysis.", []
 
@@ -377,291 +402,111 @@ def get_news_summary(token, pools=None):
         logging.error(f"Error fetching news: {e}")
         return "Unable to fetch recent news at this time.", []
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def generate_ai_summary_for_pool(pool, token_info, raw_news_data):
-    """
-    Generates an AI-driven investment summary for a given DeFi pool.
-    """
-    if not OPENAI_API_KEY:
-        return "OpenAI API key is not configured for AI summaries. Please set OPENAI_API_KEY in your .env file."
+# Nansen API Integration
+NANSEN_CHAIN_MAPPING = {
+    "ethereum": "ethereum",
+    "binance-smart-chain": "bsc", # Nansen uses 'bsc' for Binance Smart Chain
+    "polygon-pos": "polygon",
+    "arbitrum-one": "arbitrum",
+    "optimistic-ethereum": "optimism",
+    "solana": "solana",
+    "avalanche": "avalanche", # CoinGecko uses 'avalanche', Nansen also 'avalanche'
+    "base": "base",
+    "linea": "linea",
+    "fantom": "fantom",
+    "celo": "celo",
+    "gnosis": "gnosis", # Nansen uses 'xdai' for Gnosis Chain (formerly xDAI)
+    "moonriver": "moonriver",
+    "moonbeam": "moonbeam",
+    "cronos": "cronos",
+    "kava": "kava",
+    "zksync": "zksync",
+    "scroll": "scroll",
+    "mantle": "mantle",
+    "blast": "blast",
+    # Add more mappings as needed, cross-referencing CoinGecko platforms to Nansen chain_ids
+}
 
-    openai.api_key = OPENAI_API_KEY
+def normalize_contract_address(address):
+    if isinstance(address, list):
+        if len(address) == 0:
+            return None
+        first_item = address[0]
+        if isinstance(first_item, dict):
+            # Try common keys for address
+            for key in ("address", "contract", "contract_address"):
+                if key in first_item and isinstance(first_item[key], str):
+                    return first_item[key].lower()
+            # If no known key found, fail gracefully
+            return None
+        elif isinstance(first_item, str):
+            return first_item.lower()
+        else:
+            return None
+    elif isinstance(address, dict):
+        # If it's a dict, try to find address string inside
+        for key in ("address", "contract", "contract_address"):
+            if key in address and isinstance(address[key], str):
+                return address[key].lower()
+        return None
+    elif isinstance(address, str):
+        return address.lower()
+    else:
+        return None
 
-    pool_details = f"""
-    Pool Name: {pool.get('pool', 'N/A')}
-    Project: {pool.get('project', 'N/A')}
-    Symbol: {pool.get('symbol', 'N/A')}
-    Chain: {pool.get('chain', 'N/A')}
-    APY: {pool.get('apy', 0):.2f}% (Base APY: {pool.get('apyBase', 'N/A')}%, Reward APY: {pool.get('apyReward', 'N/A')}%)
-    TVL (USD): ${pool.get('tvlUsd', 0):,.0f}
-    Strategy: {classify_pool_type(pool)}
-    Calculated Risk Level: {classify_risk(pool)}
-    Impermanent Loss (IL) Risk: {pool.get('ilRisk', 'N/A')}
-    """
 
-    token_details = "Token Market Data Unavailable."
-    if token_info and token_info.get("token_data"):
-        td = token_info["token_data"]
-        md = td.get("market_data", {})
-        token_details = f"""
-        Token Name: {td.get('name', 'N/A')} ({td.get('symbol', 'N/A').upper()})
-        Current Price: ${md.get('current_price', {}).get('usd', 0):,.4f}
-        24h Price Change: {md.get('price_change_percentage_24h', 0):.2f}%
-        Market Cap: ${md.get('market_cap', {}).get('usd', 0):,.0f}
-        Market Cap Rank: #{md.get('market_cap_rank', 'N/A')}
-        All-Time High (ATH): ${md.get('ath', {}).get('usd', 0):,.4f}
-        All-Time Low (ATL): ${md.get('atl', {}).get('usd', 0):,.4f}
-        7-Day Price Change: {md.get('price_change_percentage_7d', 0):.2f}%
-        30-Day Price Change: {md.get('price_change_percentage_30d', 0):.2f}%
-        1-Year Price Change: {md.get('price_change_percentage_1y', 0):.2f}%
-        """
+def fetch_nansen_onchain_data(chain_id_for_nansen, contract_address_for_nansen, coingecko_symbol, nansen_headers):
+    results = {}
 
-    news_texts = ""
-    if raw_news_data:
-        news_texts = "\n\n".join([
-            f"Title: {n.get('title', 'No Title')}\nURL: {n.get('url', '')}\nText: {n.get('text', 'No content available.')}"
-            for n in raw_news_data
-        ])
-    if not news_texts:
-        news_texts = "No specific recent news articles found for this token or project."
-
-    summarized_crawled_info = "No specific additional information crawled for this pool from web."
-    pool_id_for_crawler = pool.get("pool") # Use the 'pool' object (the DefiLlama pool data)
-    if pool_id_for_crawler:
-        try:
-            crawled_info_result = summarize_pool_info(f"https://defillama.com/yields/pool/{pool_id_for_crawler}")
-            print(f"Crawled info for pool {pool_id_for_crawler}: {crawled_info_result}")
-            if crawled_info_result: # Check if crawler returned something
-                summarized_crawled_info = crawled_info_result
-        except Exception as e:
-            logging.error(f"Error crawling information for pool {pool_id_for_crawler}: {e}")
-            summarized_crawled_info = "Failed to retrieve additional crawled information for this pool due to an error."
-    
-
-    prompt = f"""
-    You are a highly experienced and cautious DeFi investment analyst.
-    Provide a comprehensive investment summary for the following DeFi yield pool.
-    Your analysis should be structured, cover key aspects, and conclude with a nuanced recommendation.
-
-    **DeFi Pool Data:**
-    {pool_details}
-
-    **Associated Token Market Data:**
-    {token_details}
-
-    **Recent News Articles (relevant to the token or project):**
-    {news_texts}
-
-    **Summarized Crawled Information:**
-    {summarized_crawled_info}
-
-    **Based on the above data, provide an investment insight report following this structure. Give preference to summarized crawled information relevant**
-
-    ### 💡 AI Investment Insight for {pool.get('symbol', 'N/A').upper()} on {pool.get('project', 'N/A').title()} ({pool.get('chain', 'N/A').upper()})
-
-    **1. Overview of the Pool:**
-    [Briefly describe the pool, its primary function (lending, LP farming, staking), the project it belongs to, and its TVL and current APY. Mention the calculated risk level and strategy.]
-
-    **2. Investment Opportunity & Benefits:**
-    [Explain the main attractive points. How does it generate yield? Highlight the APY in context of its TVL and risk. Mention any benefits from the token's market position or positive news.]
-
-    **3. Key Risks & Considerations:**
-    [Crucially, detail the potential downsides.
-    - **Protocol Risk:** Smart contract vulnerabilities, oracle failures, governance risks.
-    - **Market Risk:** Token price volatility (refer to 24h, 7d, 30d, 1y changes, ATH/ATL), impermanent loss (if applicable, refer to IL Risk), APY variability.
-    - **Liquidity Risk:** Consider TVL size; smaller TVL can imply lower liquidity and higher slippage.
-    - **Regulatory Risk:** General DeFi regulatory uncertainty.
-    - **News Impact:** Any negative news or warnings from the provided articles.
-    - **Identified APY Risk:** Base APY vs Reward APY
-    - **Risk Analysis:** [Provide a brief analysis of the overall risk profile based on the identified risks.]
-
-    **4. Key Features and Differentiators:**
-    [Highlight what sets this pool apart from others. Consider unique mechanisms, incentives, or partnerships that enhance its value proposition.]
-
-    **5. Underlying Protocols & Assets**
-    [Discuss the underlying protocols and assets involved. Are they well-established? Do they have a history of security and reliability?]
-
-    **6. Token Market Context:**
-    [Analyze the token's recent market performance (price trends, volatility) and its overall market cap and rank. How does its past performance inform future expectations? Is it an established asset or more speculative?]
-
-    **7. Recommendation & Suitability:**
-    [Provide a clear, balanced conclusion. Is this generally a "Good Investment," "Consider with Caution," or "High Risk, High Reward"? State what kind of investor (e.g., risk-averse, experienced, yield-hungry) this pool might be suitable for. Emphasize the importance of personal risk tolerance and due diligence. Avoid definitive "buy/sell" advice.]
-
-    **8. Important Considerations Before Investing:**
-    [Any final crucial advice, such as monitoring APY, checking audits, understanding the protocol's mechanics, and diversifying.]
-    """
+    contract_addr = normalize_contract_address(contract_address_for_nansen)
+    if not contract_addr or not chain_id_for_nansen:
+        logging.warning(f"Missing or invalid data for Nansen call: {coingecko_symbol}")
+        return None
 
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a highly experienced DeFi investment analyst. Provide clear, balanced, and actionable insights based on the provided data. Structure your response strictly as requested."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1200,
-        )
-        return response.choices[0].message.content
-    except openai.AuthenticationError:
-        return "OpenAI API key is invalid or not set. Please ensure `OPENAI_API_KEY` is correct in your .env file."
-    except openai.APICallError as e:
-        logging.error(f"OpenAI API Error: {e.code} - {e.message}")
-        return f"Error communicating with OpenAI API: {e.message}. (Code: {e.code})"
+        payload = {
+            "chain_id": chain_id_for_nansen,
+            "contract_addresses": [contract_addr]
+        }
+        r = requests.post(f"{NANSEN_API_BASE_URL}/tgm/flow-intelligence", headers=nansen_headers, json=payload)
+        r.raise_for_status()
+        results["flow_intelligence"] = r.json().get("data")
     except Exception as e:
-        logging.error(f"Failed to generate AI summary: {e}")
-        return f"An unexpected error occurred while generating the summary: {e}"
+        logging.error(f"Error fetching flow-intelligence: {e}")
+        results["flow_intelligence"] = None
 
 
-@st.cache_data(ttl=3600, show_spinner=True)
-def generate_llm_portfolio_recommendation(token_symbol, total_value, eligible_pools, risk_preference):
-    """
-    Generates a portfolio recommendation using an LLM based on user preferences.
-    The LLM also determines the optimal diversification strategy.
-    """
-    if not OPENAI_API_KEY:
-        return None, "OpenAI API key is not configured for LLM portfolio. Please set OPENAI_API_KEY in your .env file."
-
-    openai.api_key = OPENAI_API_KEY
-
-    # Prepare simplified pool data for the LLM
-    pools_for_llm = []
-    # Limit to top 25 scored pools to keep context window manageable and focus LLM on best options
-    for p in eligible_pools[:25]:
-        pools_for_llm.append({
-            "pool_id": p.get("pool"),
-            "project": p.get("project"),
-            "symbol": p.get("symbol"),
-            "chain": p.get("chain"),
-            "apy": p.get("apy"),
-            "tvlUsd": p.get("tvlUsd"),
-            "risk": classify_risk(p),
-            "strategy": classify_pool_type(p)
-        })
-
-    # FIXED: Provide the full pool ID to the LLM
-    pools_str = "\n".join([
-        f"- ID: {p['pool_id']} | Project: {p['project']} | Symbol: {p['symbol']} | Chain: {p['chain']} | APY: {p['apy']:.2f}% | TVL: ${p['tvlUsd'] / 1e6:.1f}M | Risk: {p['risk']} | Strategy: {p['strategy']}"
-        for p in pools_for_llm
-    ])
-    print(f"Pools for LLM:\n{pools_str}")
-    prompt = f"""
-You are an expert DeFi portfolio manager and strategist. Your goal is to construct a profitable, chain-diverse, and risk-appropriate yield farming portfolio tailored to the user's preferences.
-
-**User Investment Details:**
-- Total amount to invest: ${total_value:,.0f} in {token_symbol.upper()}
-- User's Risk Preference: {risk_preference} (Conservative, Balanced, or Aggressive)
-
-**Available Yield Pools (from which to choose):**
-{pools_str}
-
-**Instructions:**
-1. **Determine the optimal diversification strategy** based on the user's risk preference, the characteristics of the available pools (e.g., APY, TVL, Risk Level), and blockchain diversity.
-    - Diversify across **multiple blockchains**, especially mid-tier chains (e.g., Avalanche, Optimism, Base, Fantom), which offer strong yields and acceptable security profiles.
-    - Avoid overconcentration on a single chain, project, or high-risk pool unless warranted by the strategy (e.g., Aggressive risk preference).
-
-2. **Select relevant pools** from the "Available Yield Pools" list above based on your chosen strategy.
-    - **Only select pools that are present in the provided list. Use the full Pool ID exactly as shown.**
-    - Prefer portfolios with exposure to **at least 3 different blockchains** (favoring a mix of top-tier like Ethereum/Arbitrum and mid-tier chains like Base or Optimism) unless user preference or pool quality restricts this.
-
-3. **Determine percentage allocations** for each selected pool.
-    - The total allocation MUST sum to **100%**.
-    - Distribute allocations logically based on APY, TVL, risk level, and **chain diversity**.
-        - Conservative: Favor high TVL, low-risk pools on top-tier chains.
-        - Balanced: Mix of high-APY and lower-risk pools, with healthy exposure to mid-tier chains.
-        - Aggressive: Favor high-APY pools across multiple chains, including emerging or mid-tier networks, but still diversify to mitigate smart contract or chain-specific risk.
-
-4. **Provide a "Portfolio Explanation" first, followed by a "Portfolio Allocation" markdown table.**
-
-**Portfolio Explanation:**
-[Explain your strategic approach to constructing this portfolio. Clearly state the chosen diversification strategy (e.g., ‘Multi-Chain Balanced’ or ‘Aggressive Mid-Tier Yield Strategy’). Discuss how the selected pools and their allocations align with the user’s risk preference, including rationale for chain exposure, APY prioritization, and risk mitigation. Highlight key advantages and potential trade-offs.]
-
-**Portfolio Allocation:**
-| Pool ID | Project | Symbol | Chain | APY (%) | Risk Level | Allocation (%) |
-|---|---|---|---|---|---|---|
-"""
-
-
+    # 2. Smart Money Inflows
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a professional DeFi portfolio manager. Provide clear, balanced, and actionable portfolio recommendations. Structure your response strictly as requested, providing an explanation first and then a markdown table for allocation."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1500,
-        )
-        llm_output = response.choices[0].message.content
-        logging.info(f"LLM Raw Output:\n{llm_output}")
-
-        # Parse the LLM's output
-        if "Portfolio Allocation:" not in llm_output:
-            return None, "LLM response did not contain the expected 'Portfolio Allocation:' section. Please try again."
-
-        explanation_part, allocation_table_part = llm_output.split("Portfolio Allocation:", 1)
-        explanation = explanation_part.strip()
-
-        # Extract markdown table
-        table_lines = allocation_table_part.strip().split('\n')
-        if len(table_lines) < 2: # Check for at least header and one row
-            return None, "LLM response's allocation table is malformed or empty. Please try again."
-
-        # FIXED: Filter for valid table rows to ignore trailing text from the LLM
-        data_rows = [line for line in table_lines if line.strip().startswith('|') and '---' not in line and 'Pool ID' not in line]
-
-
-        portfolio_allocations = []
-        # FIXED: Create a mapping from the FULL pool ID back to the original pool object
-        pool_id_map = {p.get("pool", ""): p for p in eligible_pools}
-
-        for row in data_rows:
-            if "TOTAL" in row.upper(): # Skip the total row if LLM adds it
-                continue
-            cols = [col.strip() for col in row.strip('|').split('|')]
-            if len(cols) == 7: # Expect 7 columns as defined in prompt
-                try:
-                    pool_id = cols[0] # This is now the full ID
-                    allocation_percent_str = cols[6].replace('%', '').strip()
-                    allocation_percent = float(allocation_percent_str)
-
-                    # FIXED: Look up using the full ID
-                    original_pool_data = pool_id_map.get(pool_id)
-
-                    if original_pool_data:
-                        portfolio_allocations.append({
-                            "pool": original_pool_data,
-                            "allocation_percent": allocation_percent,
-                            "risk": classify_risk(original_pool_data),
-                            "apy": original_pool_data.get("apy", 0)
-                        })
-                    else:
-                        logging.warning(f"Could not map pool ID '{pool_id}' from LLM output back to original pool list. The LLM may have hallucinated a pool.")
-                except (ValueError, IndexError) as e:
-                    logging.error(f"Error parsing table row data: {row} - {e}")
-                    continue
-            else:
-                logging.warning(f"Skipping malformed table row: {row}. Expected 7 columns, got {len(cols)}")
-
-        # Normalize allocations if they don't sum to exactly 100% (due to LLM rounding)
-        current_total_allocation = sum([item["allocation_percent"] for item in portfolio_allocations])
-        if current_total_allocation > 0 and abs(current_total_allocation - 100) > 0.1:
-            logging.warning(f"Allocations sum to {current_total_allocation:.2f}%, normalizing to 100%.")
-            for item in portfolio_allocations:
-                item["allocation_percent"] = (item["allocation_percent"] / current_total_allocation) * 100
-
-        return portfolio_allocations, explanation
-
-    except openai.AuthenticationError:
-        return None, "OpenAI API key is invalid or not set. Please ensure `OPENAI_API_KEY` is correct in your .env file."
-    except openai.APICallError as e:
-        logging.error(f"OpenAI API Error: {e.code} - {e.message}")
-        return None, f"Error communicating with OpenAI API: {e.message}. (Code: {e.code})"
+        payload = {
+            "chain_id": chain_id_for_nansen,
+            "contract_address": contract_address_for_nansen.lower(),
+            "time_range": "24h"
+        }
+        r = requests.post(f"{NANSEN_API_BASE_URL}/smart-money/inflows", headers=nansen_headers, json=payload)
+        r.raise_for_status()
+        results["smart_money_inflows"] = r.json().get("data")
     except Exception as e:
-        logging.error(f"Failed to generate LLM portfolio: {e}")
-        return None, f"An unexpected error occurred while generating the portfolio: {e}"
+        logging.error(f"Error fetching smart-money-inflows: {e}")
+        results["smart_money_inflows"] = None
 
+    # 3. Holders
+    try:
+        payload = {
+            "chain_id": chain_id_for_nansen,
+            "token_address": contract_address_for_nansen.lower(),
+            "limit": 5
+        }
+        r = requests.post(f"{NANSEN_API_BASE_URL}/tgm/holders", headers=nansen_headers, json=payload)
+        r.raise_for_status()
+        results["holders"] = r.json().get("data")
+    except Exception as e:
+        logging.error(f"Error fetching holders: {e}")
+        results["holders"] = None
 
-# UI Components
+    return results
+
+# UI Components (Keeping existing functions and adding Nansen display)
 def create_token_info_card(token_data):
     """Create token info card with CoinGecko data"""
     if not token_data:
@@ -712,8 +557,8 @@ def create_token_info_card(token_data):
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-def create_pool_card(pool, strategy, risk, token_data_for_ai, raw_news_data_for_ai):
-    """Create enhanced pool card with AI summary button"""
+def create_pool_card_with_dual_reports(pool, strategy, risk, token_data_for_ai, raw_news_data_for_ai):
+    """Enhanced pool card with both report types"""
     apy = pool.get("apy", 0)
     apy_base = pool.get("apyBase", None)
     apy_reward = pool.get("apyReward", None)
@@ -725,9 +570,14 @@ def create_pool_card(pool, strategy, risk, token_data_for_ai, raw_news_data_for_
     il_risk = pool.get("ilRisk", "N/A")
     url = f"https://defillama.com/yields/pool/{pool_id}"
 
-    ai_summary_key = f"ai_summary_expander_{pool_id}"
-    if ai_summary_key not in st.session_state:
-        st.session_state[ai_summary_key] = False
+    # Session state keys for both report types
+    breakdown_key = f"breakdown_report_{pool_id}"
+    comprehensive_key = f"comprehensive_report_{pool_id}"
+    
+    if breakdown_key not in st.session_state:
+        st.session_state[breakdown_key] = False
+    if comprehensive_key not in st.session_state:
+        st.session_state[comprehensive_key] = False
 
     with st.container():
         border_colors = {"Low": "#10b981", "Medium": "#f59e0b", "High": "#ef4444"}
@@ -786,16 +636,57 @@ def create_pool_card(pool, strategy, risk, token_data_for_ai, raw_news_data_for_
 
         st.markdown(f"[🔗 View on DefiLlama]({url})")
 
-        if st.button("✨ Get AI Summary", key=f"ai_btn_{pool_id}"):
-            st.session_state[ai_summary_key] = not st.session_state[ai_summary_key]
+        # Report selection buttons
+        st.markdown("### 📊 Analysis Reports")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📈 Pool Breakdown Analysis", key=f"breakdown_btn_{pool_id}", help="Quick tactical analysis with metrics focus"):
+                st.session_state[breakdown_key] = not st.session_state[breakdown_key]
+                st.session_state[comprehensive_key] = False  # Close other report
+        
+        with col2:
+            if st.button("🔍 Comprehensive Investment Report", key=f"comprehensive_btn_{pool_id}", help="Deep research with web crawling"):
+                st.session_state[comprehensive_key] = not st.session_state[comprehensive_key]
+                st.session_state[breakdown_key] = False  # Close other report
 
-        if st.session_state[ai_summary_key]:
-            with st.spinner("Generating AI Summary... This might take a moment."):
-                ai_summary = generate_ai_summary_for_pool(pool, token_data_for_ai, raw_news_data_for_ai)
-            st.markdown(f'<div class="ai-summary">{ai_summary}</div>', unsafe_allow_html=True)
+        # Display breakdown report
+        if st.session_state[breakdown_key]:
+            with st.spinner("🔄 Generating Pool Breakdown Analysis..."):
+                # Prepare token info string for the breakdown report
+                token_info_str = ""
+                if token_data_for_ai and token_data_for_ai.get("token_data"):
+                    td = token_data_for_ai["token_data"]
+                    md = td.get("market_data", {})
+                    token_info_str = f"""
+                    Token: {td.get('name', 'N/A')} ({td.get('symbol', 'N/A').upper()})
+                    Price: ${md.get('current_price', {}).get('usd', 0):,.4f}
+                    24h Change: {md.get('price_change_percentage_24h', 0):.2f}%
+                    Market Cap: ${md.get('market_cap', {}).get('usd', 0):,.0f}
+                    """
+                
+                breakdown_report = generate_pool_analysis(
+                    pool_data=pool,
+                    token_info=token_info_str,
+                    news_data=raw_news_data_for_ai,
+                    report_type="breakdown"
+                )
+            
+            st.markdown(f'<div class="breakdown-report">{breakdown_report}</div>', unsafe_allow_html=True)
+
+        # Display comprehensive report
+        if st.session_state[comprehensive_key]:
+            with st.spinner("🌐 Generating Comprehensive Investment Report (includes web crawling)..."):
+                comprehensive_report = generate_pool_analysis(
+                    pool_data=pool,
+                    token_info="",  # Comprehensive report gets info from web crawling
+                    news_data=raw_news_data_for_ai,
+                    report_type="comprehensive"
+                )
+            
+            st.markdown(f'<div class="comprehensive-report">{comprehensive_report}</div>', unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
-
 
 def create_price_chart(price_history):
     """Create price chart using Plotly"""
@@ -833,196 +724,124 @@ def create_price_chart(price_history):
 
     return fig
 
-# MODIFIED: create_portfolio_optimizer no longer takes diversification_level from user
-def create_portfolio_optimizer(token_symbol, pools, token_amount, token_price):
-    """Create profit-maximizing portfolio optimization interface, powered by LLM"""
-    st.subheader("🎯 LLM-Powered Portfolio Constructor")
+# Enhanced Portfolio Functions
+@st.cache_data(ttl=3600, show_spinner=True)
+def generate_llm_portfolio_recommendation(token_symbol, total_value, eligible_pools, risk_preference):
+    """Generate portfolio recommendation using LLM"""
+    if not OPENAI_API_KEY:
+        return None, "OpenAI API key is not configured for LLM portfolio."
 
-    total_value = token_amount * token_price
+    openai.api_key = OPENAI_API_KEY
 
-    if total_value == 0:
-        st.warning("Please enter a valid token amount and ensure token price is available to construct a portfolio.")
-        return []
+    pools_for_llm = []
+    for p in eligible_pools[:25]:
+        pools_for_llm.append({
+            "pool_id": p.get("pool"),
+            "project": p.get("project"),
+            "symbol": p.get("symbol"),
+            "chain": p.get("chain"),
+            "apy": p.get("apy"),
+            "tvlUsd": p.get("tvlUsd"),
+            "risk": classify_risk(p),
+            "strategy": classify_pool_type(p)
+        })
 
-    # Only one input: Risk Preference
-    risk_preference = st.selectbox(
-        "Risk Preference",
-        ["Conservative", "Balanced", "Aggressive"],
-        help="Conservative: Focus on stability and lower risk. Balanced: Optimize for risk-reward. Aggressive: Focus on maximizing potential returns, higher risk."
-    )
+    pools_str = "\n".join([
+        f"- ID: {p['pool_id']} | Project: {p['project']} | Symbol: {p['symbol']} | Chain: {p['chain']} | APY: {p['apy']:.2f}% | TVL: ${p['tvlUsd'] / 1e6:.1f}M | Risk: {p['risk']} | Strategy: {p['strategy']}"
+        for p in pools_for_llm
+    ])
 
-    # Filter pools to pass to LLM - LLM will do the final selection and allocation
-    eligible_pools = [p for p in pools if p.get("tvlUsd", 0) >= 500_000 and p.get("apy", 0) >= 0.5]
+    prompt = f"""
+You are an expert DeFi portfolio manager. Construct a profitable, chain-diverse, and risk-appropriate yield farming portfolio.
 
-    if not eligible_pools:
-        st.warning("No eligible pools found for portfolio construction after initial filtering.")
-        return []
+**User Investment Details:**
+- Total amount: ${total_value:,.0f} in {token_symbol.upper()}
+- Risk Preference: {risk_preference}
 
-    # Sort eligible pools by the general score, so the LLM gets better options first
-    eligible_pools.sort(key=score_pool, reverse=True)
+**Available Pools:**
+{pools_str}
 
-    if st.button("🚀 Construct Portfolio (Powered by LLM)"):
-        with st.spinner("Generating portfolio recommendation with AI... This may take up to 30 seconds."):
-            portfolio_allocations_llm, explanation_llm = generate_llm_portfolio_recommendation(
-                token_symbol,
-                total_value,
-                eligible_pools,
-                risk_preference # Only risk preference is passed to LLM
-            )
+**Instructions:**
+1. Determine optimal diversification strategy based on risk preference
+2. Select pools from the provided list (use exact Pool IDs)
+3. Prefer exposure to at least 3 different blockchains
+4. Provide percentage allocations that sum to 100%
 
-        if portfolio_allocations_llm is None:
-            st.error(f"Failed to generate portfolio: {explanation_llm}")
-            return []
-        logging.info(f"LLM Portfolio Allocations: {portfolio_allocations_llm}")
+**Portfolio Explanation:**
+[Explain your strategic approach and rationale]
 
-        if portfolio_allocations_llm:
-            portfolio = []
-            total_expected_return = 0
+**Portfolio Allocation:**
+| Pool ID | Project | Symbol | Chain | APY (%) | Risk Level | Allocation (%) |
+|---|---|---|---|---|---|---|
+"""
 
-            for item in portfolio_allocations_llm:
-                pool = item["pool"]
-                allocation_percent = item["allocation_percent"]
-                amount = total_value * (allocation_percent / 100)
-                expected_return = amount * (pool["apy"] / 100)
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a professional DeFi portfolio manager."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1500,
+        )
+        llm_output = response.choices[0].message.content
 
-                portfolio.append({
-                    "pool": pool,
-                    "allocation": allocation_percent / 100, # Store as decimal for calculations
-                    "amount": amount,
-                    "risk": item["risk"],
-                    "apy": item["apy"],
-                    "expected_return": expected_return,
-                })
-                total_expected_return += expected_return
+        if "Portfolio Allocation:" not in llm_output:
+            return None, "LLM response malformed."
 
-            weighted_apy = (total_expected_return / total_value) * 100 if total_value > 0 else 0
+        explanation_part, allocation_table_part = llm_output.split("Portfolio Allocation:", 1)
+        explanation = explanation_part.strip()
 
-            # Extract diversification strategy from LLM explanation for display
-            # Assuming the LLM will state it clearly, e.g., "The chosen diversification strategy is: Single Best Pool"
-            diversification_strategy_match = re.search(r"chosen diversification strategy (?:is|was):\s*([^\.\n]+)", explanation_llm, re.IGNORECASE)
-            llm_decided_strategy = diversification_strategy_match.group(1).strip() if diversification_strategy_match else "LLM Decided"
+        table_lines = allocation_table_part.strip().split('\n')
+        data_rows = [line for line in table_lines if line.strip().startswith('|') and '---' not in line and 'Pool ID' not in line]
 
+        portfolio_allocations = []
+        pool_id_map = {p.get("pool", ""): p for p in eligible_pools}
 
-            # Portfolio summary with profit focus
-            st.markdown(f"""
-            <div class="portfolio-summary">
-                <h3 style="margin-top: 0;">💰 LLM-Recommended Portfolio Summary</h3>
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
-                    <div style="text-align: center;">
-                        <div style="font-size: 2rem; font-weight: bold; color: #4ade80;">${total_expected_return:,.0f}</div>
-                        <div>Expected Annual Profit</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="font-size: 2rem; font-weight: bold;">{weighted_apy:.2f}%</div>
-                        <div>Portfolio APY</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="font-size: 2rem; font-weight: bold;">{len(portfolio)}</div>
-                        <div>Pools Selected</div>
-                    </div>
-                     <div style="text-align: center;">
-                        <div style="font-size: 2rem; font-weight: bold;">${total_value:,.0f}</div>
-                        <div>Total Invested</div>
-                    </div>
-                </div>
-                <div style="text-align: center; margin-top: 1rem; padding: 1rem; background: rgba(255,255,255,0.1); border-radius: 10px;">
-                    <strong>LLM Strategy: {llm_decided_strategy} • Risk Profile: {risk_preference}</strong>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+        for row in data_rows:
+            if "TOTAL" in row.upper():
+                continue
+            cols = [col.strip() for col in row.strip('|').split('|')]
+            if len(cols) == 7:
+                try:
+                    pool_id = cols[0]
+                    allocation_percent_str = cols[6].replace('%', '').strip()
+                    allocation_percent = float(allocation_percent_str)
 
-            # Display LLM's explanation
-            st.markdown("### 🧠 LLM's Strategy Explanation")
-            st.markdown(explanation_llm)
+                    original_pool_data = pool_id_map.get(pool_id)
 
-            # Portfolio breakdown with profit metrics
-            st.subheader("💎 Portfolio Allocation (Recommended by LLM)")
+                    if original_pool_data:
+                        portfolio_allocations.append({
+                            "pool": original_pool_data,
+                            "allocation_percent": allocation_percent,
+                            "risk": classify_risk(original_pool_data),
+                            "apy": original_pool_data.get("apy", 0)
+                        })
+                    else:
+                        logging.warning(f"Could not map pool ID '{pool_id}' from LLM output.")
+                except (ValueError, IndexError) as e:
+                    logging.error(f"Error parsing table row: {row} - {e}")
+                    continue
 
-            portfolio_display = sorted(portfolio, key=lambda x: x["allocation"], reverse=True)
+        # Normalize allocations
+        current_total_allocation = sum([item["allocation_percent"] for item in portfolio_allocations])
+        if current_total_allocation > 0 and abs(current_total_allocation - 100) > 0.1:
+            for item in portfolio_allocations:
+                item["allocation_percent"] = (item["allocation_percent"] / current_total_allocation) * 100
 
-            for i, item in enumerate(portfolio_display, 1):
-                pool = item["pool"]
-                allocation = item["allocation"]
-                amount = item["amount"]
-                expected_return = item["expected_return"]
+        return portfolio_allocations, explanation
 
-                if allocation >= 0.4:
-                    border_color = "#10b981"
-                elif allocation >= 0.2:
-                    border_color = "#3b82f6"
-                else:
-                    border_color = "#6b7280"
-
-                st.markdown(f"""
-                <div style="border-left: 4px solid {border_color}; background: white; padding: 1rem;
-                            margin: 0.5rem 0; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                """, unsafe_allow_html=True)
-
-                col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-
-                with col1:
-                    st.markdown(f"""
-                    **#{i} {pool['project'].title()} - {pool['symbol'].upper()}**
-                    Chain: {pool['chain'].upper()} | APY: {pool['apy']:.2f}% | Risk: {item['risk']}
-                    """)
-
-                with col2:
-                    st.metric("Allocation", f"{allocation*100:.1f}%")
-
-                with col3:
-                    st.metric("Investment", f"${amount:,.0f}")
-
-                with col4:
-                    st.metric("Expected Return", f"${expected_return:,.0f}/yr")
-
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            # Risk vs Return scatter plot (using actual allocations)
-            if len(portfolio) > 1:
-                fig_scatter = px.scatter(
-                    x=[item["apy"] for item in portfolio],
-                    y=[item["allocation"] * 100 for item in portfolio],
-                    size=[item["amount"] for item in portfolio],
-                    color=[item["risk"] for item in portfolio],
-                    hover_data={
-                        "Project": [item["pool"]["project"] for item in portfolio],
-                        "Symbol": [item["pool"]["symbol"] for item in portfolio],
-                        "Allocation": [f"{item['allocation']*100:.1f}%" for item in portfolio],
-                        "Investment": [f"${item['amount']:,.0f}" for item in portfolio],
-                        "Expected Return": [f"${item['expected_return']:,.0f}/yr" for item in portfolio],
-                    },
-                    title="Portfolio Allocation vs APY",
-                    labels={"x": "APY (%)", "y": "Allocation (%)", "color": "Risk Level"},
-                    color_discrete_map={"Low": "#10b981", "Medium": "#f59e0b", "High": "#ef4444"}
-                )
-                fig_scatter.update_layout(height=400)
-                st.plotly_chart(fig_scatter, use_container_width=True)
-
-            # Risk distribution
-            risk_dist = {"Low": 0, "Medium": 0, "High": 0}
-            for item in portfolio:
-                risk_dist[item["risk"]] += item["allocation"]
-
-            fig_pie = px.pie(
-                values=list(risk_dist.values()),
-                names=list(risk_dist.keys()),
-                title="Portfolio Risk Distribution",
-                color_discrete_map={"Low": "#10b981", "Medium": "#f59e0b", "High": "#ef4444"}
-            )
-            fig_pie.update_layout(height=300)
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-            return portfolio
-        else:
-            st.warning("The LLM could not construct a portfolio based on the provided parameters. Try adjusting your preferences.")
-            return []
-    return []
-
+    except openai.AuthenticationError:
+        return None, "OpenAI API key is invalid or not set."
+    except Exception as e:
+        logging.error(f"Failed to generate LLM portfolio: {e}")
+        return None, f"An unexpected error occurred: {e}"
 
 # Main Application
 def main():
     st.set_page_config(
-        page_title="DeFi Yield Explorer",
+        page_title="DeFi Yield Explorer - Enhanced Reports",
         page_icon="🚀",
         layout="wide"
     )
@@ -1035,10 +854,46 @@ def main():
             🚀 DeFi Yield Explorer
         </h1>
         <p style="font-size: 1.2rem; color: #6b7280; margin: 0.5rem 0;">
-            Discover, analyze, and optimize your DeFi yield farming strategies with AI insights
+            Discover, analyze, and optimize your DeFi yield farming strategies with dual AI report types
         </p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Enhanced intro section explaining report types
+    with st.expander("📋 Report Types Explained", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            ### 📈 Pool Breakdown Analysis
+            **Fast & Tactical** - Perfect for active traders
+            
+            **Features:**
+            - ⚡ Quick generation (no web crawling)
+            - 📊 Deep metrics analysis (APY breakdown, IL calculations)
+            - 🎯 Position sizing recommendations
+            - 📉 Technical indicators & efficiency ratios
+            - 🔄 Rebalancing strategies
+            - 💰 Capital allocation guidance
+            
+            **Best for:** Day-to-day portfolio management, tactical decisions
+            """)
+        
+        with col2:
+            st.markdown("""
+            ### 🔍 Comprehensive Investment Report
+            **Deep & Thorough** - Perfect for major investments
+            
+            **Features:**
+            - 🌐 Web crawling of official docs & audits
+            - 📋 Multi-source information synthesis
+            - 🛡️ Detailed security analysis
+            - 📖 Protocol deep-dive research
+            - ⚖️ Risk assessment from multiple angles
+            - 🎯 Investment thesis validation
+            
+            **Best for:** Major investment decisions, due diligence
+            """)
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -1050,13 +905,130 @@ def main():
         st.info("👆 Enter a token symbol above to start exploring yield opportunities")
         return
 
+    nansen_data = None # Initialize Nansen data
     with st.spinner("🔄 Fetching token data and yield opportunities..."):
         token_data = fetch_coingecko_token_data(token)
         pools = fetch_yield_opportunities(token)
+        coingecko_symbol = token_data.get("symbol", "").lower()
+        nansen_headers = {
+            "x-api-key": NANSEN_API_KEY,
+            "Content-Type": "application/json"
+        }
+
+
+
+        if token_data and token_data.get("token_data"):
+            # Fetch Nansen data using the full CoinGecko token info and the pools
+
+            nansen_data = fetch_nansen_onchain_data(token_data["token_data"], pools, coingecko_symbol, nansen_headers)
 
     if not pools:
         st.warning(f"❌ No suitable yield pools found for token '{token.upper()}'")
-        return
+        # Still show token info and news/Nansen if pools are empty but token data exists
+        if token_data:
+            create_token_info_card(token_data)
+            price_chart = create_price_chart(token_data.get("price_history"))
+            if price_chart:
+                st.plotly_chart(price_chart, use_container_width=True)
+            news_summary_display, raw_news_for_ai = get_news_summary(token, pools) # Pass empty pools if none
+
+            # Directly show Tab 3 content if no pools found for quick lookup
+            st.markdown("---")
+            st.markdown("### 📰 Market Intelligence (No Yield Pools Found)")
+            st.markdown(news_summary_display)
+
+            market_data = token_data["token_data"].get("market_data", {})
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("#### 📊 Market Metrics (from CoinGecko)")
+                st.write(f"**All-time High:** ${market_data.get('ath', {}).get('usd', 0):,.4f}")
+                st.write(f"**All-time Low:** ${market_data.get('atl', {}).get('usd', 0):,.4f}")
+                st.write(f"**Market Cap Rank:** #{market_data.get('market_cap_rank', 'N/A')}")
+            with col2:
+                st.markdown("#### ⏱️ Performance (from CoinGecko)")
+                st.write(f"**7d Change:** {market_data.get('price_change_percentage_7d', 0):.2f}%")
+                st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
+                st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
+            
+            if nansen_data:
+                st.markdown("### 🕵️ Nansen On-chain Insights")
+                # Display Token Screener data
+                if nansen_data.get("token_screener"):
+                    st.subheader("🔹 Token Screener")
+                    screener_items = nansen_data["token_screener"]
+                    if screener_items:
+                        for item in screener_items:
+                            st.write(f"**Chain:** {item.get('chain_id', 'N/A').replace('_', ' ').title()}")
+                            st.write(f"- Market Cap: ${item.get('market_cap', 0):,.0f}")
+                            st.write(f"- 24h Volume: ${item.get('volume_24h', 0):,.0f}")
+                            st.write(f"- Price: ${item.get('current_price', 0):,.4f}")
+                            st.write(f"- 24h Price Change: {item.get('price_change_percentage_24h', 0):.2f}%")
+                            st.write(f"- On-chain Score (Nansen): {item.get('onchain_score', 'N/A')}")
+                            st.markdown("---")
+                    else:
+                        st.info("No token screener data available from Nansen for this token/chain combination.")
+
+                # Display Flow Intelligence data
+                if nansen_data.get("flow_intelligence"):
+                    st.subheader("🔹 Flow Intelligence")
+                    flow_items = nansen_data["flow_intelligence"]
+                    if flow_items:
+                        flow_summary = flow_items[0].get("summary", {}) if flow_items else {}
+                        if flow_summary:
+                            st.write(f"**Net Flows (Last 24h):**")
+                            st.write(f"- Smart Money: ${flow_summary.get('smart_money_net_flow_usd_24h', 0):,.0f}")
+                            st.write(f"- Exchanges: ${flow_summary.get('exchange_net_flow_usd_24h', 0):,.0f}")
+                            st.write(f"- Top PnL Traders: ${flow_summary.get('top_pnl_traders_net_flow_usd_24h', 0):,.0f}")
+                            st.write(f"- Whales: ${flow_summary.get('whales_net_flow_usd_24h', 0):,.0f}")
+                            st.write(f"- Public Figures: ${flow_summary.get('public_figures_net_flow_usd_24h', 0):,.0f}")
+                            st.write(f"- Fresh Wallets: ${flow_summary.get('fresh_wallets_net_flow_usd_24h', 0):,.0f}")
+                        else:
+                            st.info("No flow intelligence summary available.")
+                    else:
+                        st.info("No flow intelligence data available from Nansen.")
+
+                # Display Smart Money Inflows data
+                if nansen_data.get("smart_money_inflows"):
+                    st.subheader("🔹 Smart Money Inflows/Outflows (Last 24h)")
+                    sm_inflows_data = nansen_data["smart_money_inflows"]
+                    if sm_inflows_data:
+                        sm_data = sm_inflows_data[0] if sm_inflows_data else {} 
+                        if sm_data:
+                            st.write(f"- Total Net Flow: **${sm_data.get('net_flow', 0):,.0f}**")
+                            st.write(f"- Buy Volume: ${sm_data.get('buy_volume', 0):,.0f}")
+                            st.write(f"- Sell Volume: ${sm_data.get('sell_volume', 0):,.0f}")
+                            st.write(f"- Unique Wallets Bought: {sm_data.get('unique_wallets_bought', 0)}")
+                            st.write(f"- Unique Wallets Sold: {sm_data.get('unique_wallets_sold', 0)}")
+                        else:
+                            st.info("No Smart Money inflows data available.")
+                    else:
+                        st.info("No Smart Money inflows data available from Nansen.")
+
+                # Display Top Holders data
+                if nansen_data.get("holders"):
+                    st.subheader("🔹 Top Holders Distribution")
+                    holders_data = nansen_data["holders"]
+                    if holders_data:
+                        for holder_type, holders_list in holders_data.items():
+                            if holders_list:
+                                st.write(f"**{holder_type.replace('_', ' ').title()}:**")
+                                df_holders = pd.DataFrame(holders_list)
+                                if not df_holders.empty:
+                                    df_holders_display = df_holders[['address', 'amount', 'percentage']].copy()
+                                    df_holders_display['address'] = df_holders_display['address'].apply(lambda x: f"{x[:6]}...{x[-4:]}")
+                                    df_holders_display['amount'] = df_holders_display['amount'].apply(lambda x: f"{x:,.0f}")
+                                    df_holders_display['percentage'] = df_holders_display['percentage'].apply(lambda x: f"{x:.2f}%")
+                                    st.dataframe(df_holders_display, hide_index=True)
+                                else:
+                                    st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
+                            else:
+                                st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
+                        st.markdown("---")
+                    else:
+                        st.info("No Nansen top holders data available.")
+            else:
+                st.info("Nansen on-chain data not available. Ensure Nansen API key is configured and token data is fetched successfully.")
+        return # Exit if no pools
 
     if token_data:
         create_token_info_card(token_data)
@@ -1071,7 +1043,6 @@ def main():
         token_price = 0
 
     pools.sort(key=score_pool, reverse=True)
-
     news_summary_display, raw_news_for_ai = get_news_summary(token, pools)
 
     tab1, tab2, tab3 = st.tabs(["🎯 Pool Explorer", "📊 Portfolio Constructor", "📰 Market Intel"])
@@ -1090,6 +1061,7 @@ def main():
 
         st.markdown(f"### 🏆 Top Yield Opportunities for {token.upper()}")
 
+        # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             avg_apy = sum([p["apy"] for p in pools]) / len(pools) if pools else 0
@@ -1101,6 +1073,16 @@ def main():
             st.metric("Available Pools", len(pools))
         with col4:
             st.metric("Low Risk Pools", len(risk_groups["Low"]))
+
+        # Report type selector at the top
+        st.markdown("### 📊 Choose Your Analysis Style")
+        
+        analysis_style = st.radio(
+            "Select default report type for pools:",
+            ["📈 Pool Breakdown (Fast)", "🔍 Comprehensive (Deep)"],
+            horizontal=True,
+            help="You can always switch between both types for each individual pool"
+        )
 
         risk_emojis = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}
 
@@ -1117,7 +1099,7 @@ def main():
             for pool in display_pools:
                 strategy = classify_pool_type(pool)
                 risk_level = classify_risk(pool)
-                create_pool_card(pool, strategy, risk_level, token_data, raw_news_for_ai)
+                create_pool_card_with_dual_reports(pool, strategy, risk_level, token_data, raw_news_for_ai)
                 st.markdown("---")
 
             if len(risk_pools) > 3:
@@ -1127,31 +1109,118 @@ def main():
                     st.rerun()
 
     with tab2:
+        st.markdown("### 📊 AI-Powered Portfolio Constructor")
+        
         if token_price > 0:
-            # diversification_level is no longer passed here
-            portfolio = create_portfolio_optimizer(token, pools, token_amount, token_price)
+            col1, col2 = st.columns(2)
+            with col1:
+                investment_amount = st.number_input(
+                    f"💰 Investment Amount (USD)", 
+                    min_value=100.0, 
+                    value=float(token_amount * token_price) if token_price > 0 else 1000.0,
+                    step=100.0
+                )
+            
+            with col2:
+                risk_preference = st.selectbox(
+                    "🎯 Risk Preference",
+                    ["Conservative", "Balanced", "Aggressive"],
+                    index=1
+                )
 
-            if portfolio:
-                if st.button("📥 Export Portfolio Data"):
-                    portfolio_df = pd.DataFrame([{
-                        "Project": item["pool"]["project"],
-                        "Symbol": item["pool"]["symbol"],
-                        "Chain": item["pool"]["chain"],
-                        "APY": item["pool"]["apy"],
-                        "TVL": item["pool"]["tvlUsd"],
-                        "Risk": item["risk"],
-                        "Allocation": f"{item['allocation']*100:.1f}%",
-                        "Amount": f"${item['amount']:,.2f}",
-                        "Pool_URL": f"https://defillama.com/yields/pool/{item['pool']['pool']}"
-                    } for item in portfolio])
-
-                    csv = portfolio_df.to_csv(index=False)
-                    st.download_button(
-                        label="💾 Download CSV",
-                        data=csv,
-                        file_name=f"{token.upper()}_portfolio_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv"
+            if st.button("🤖 Generate AI Portfolio", type="primary"):
+                with st.spinner("🔄 AI is analyzing pools and generating optimal portfolio..."):
+                    portfolio_allocations, explanation = generate_llm_portfolio_recommendation(
+                        token, investment_amount, pools[:25], risk_preference
                     )
+                
+                if portfolio_allocations:
+                    st.markdown("### 🎯 Your Optimized Portfolio")
+                    st.markdown(f"**Strategy Explanation:**\n{explanation}")
+                    
+                    # Portfolio summary
+                    total_expected_apy = sum([item["apy"] * (item["allocation_percent"]/100) for item in portfolio_allocations])
+                    chain_diversity = len(set([item["pool"]["chain"] for item in portfolio_allocations]))
+                    risk_distribution = {}
+                    for item in portfolio_allocations:
+                        risk_level = item["risk"]
+                        risk_distribution[risk_level] = risk_distribution.get(risk_level, 0) + item["allocation_percent"]
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Expected APY", f"{total_expected_apy:.2f}%")
+                    with col2:
+                        st.metric("Chain Diversity", f"{chain_diversity} chains")
+                    with col3:
+                        st.metric("Total Investment", f"${investment_amount:,.0f}")
+                    with col4:
+                        low_risk_pct = risk_distribution.get("Low", 0)
+                        st.metric("Low Risk %", f"{low_risk_pct:.1f}%")
+                    
+                    # Detailed portfolio breakdown
+                    st.markdown("### 📋 Portfolio Breakdown")
+                    
+                    portfolio_data = []
+                    for item in portfolio_allocations:
+                        pool = item["pool"]
+                        allocation_amount = investment_amount * (item["allocation_percent"] / 100)
+                        
+                        portfolio_data.append({
+                            "Project": pool["project"],
+                            "Symbol": pool["symbol"],
+                            "Chain": pool["chain"],
+                            "APY": f"{pool['apy']:.2f}%",
+                            "Risk": item["risk"],
+                            "Allocation": f"{item['allocation_percent']:.1f}%",
+                            "Amount": f"${allocation_amount:,.0f}",
+                            "Expected Annual": f"${allocation_amount * pool['apy'] / 100:,.0f}"
+                        })
+                    
+                    df = pd.DataFrame(portfolio_data)
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # Download option
+                    if st.button("📥 Export Portfolio Data"):
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="💾 Download CSV",
+                            data=csv,
+                            file_name=f"{token.upper()}_portfolio_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv"
+                        )
+                    
+                    # Individual pool reports for portfolio
+                    st.markdown("### 📊 Detailed Analysis for Portfolio Pools")
+                    
+                    for item in portfolio_allocations:
+                        pool = item["pool"]
+                        strategy = classify_pool_type(pool)
+                        risk_level = item["risk"]
+                        
+                        with st.expander(f"📈 {pool['project']} - {pool['symbol']} ({item['allocation_percent']:.1f}% allocation)"):
+                            # Quick breakdown report for each portfolio pool
+                            token_info_str = ""
+                            if token_data and token_data.get("token_data"):
+                                td = token_data["token_data"]
+                                md = td.get("market_data", {})
+                                token_info_str = f"""
+                                Token: {td.get('name', 'N/A')} ({td.get('symbol', 'N/A').upper()})
+                                Price: ${md.get('current_price', {}).get('usd', 0):,.4f}
+                                24h Change: {md.get('price_change_percentage_24h', 0):.2f}%
+                                """
+                            
+                            with st.spinner("Generating portfolio pool analysis..."):
+                                breakdown_report = generate_pool_analysis(
+                                    pool_data=pool,
+                                    token_info=token_info_str,
+                                    news_data=raw_news_for_ai,
+                                    report_type="breakdown"
+                                )
+                            
+                            st.markdown(breakdown_report)
+                
+                else:
+                    st.error("❌ Failed to generate portfolio. Please try again.")
         else:
             st.warning("⚠️ Token price data needed for portfolio construction")
 
@@ -1164,19 +1233,133 @@ def main():
 
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("#### 📊 Market Metrics")
+                st.markdown("#### 📊 Market Metrics (from CoinGecko)")
                 st.write(f"**All-time High:** ${market_data.get('ath', {}).get('usd', 0):,.4f}")
                 st.write(f"**All-time Low:** ${market_data.get('atl', {}).get('usd', 0):,.4f}")
                 st.write(f"**Market Cap Rank:** #{market_data.get('market_cap_rank', 'N/A')}")
 
             with col2:
-                st.markdown("#### ⏱️ Performance")
+                st.markdown("#### ⏱️ Performance (from CoinGecko)")
                 st.write(f"**7d Change:** {market_data.get('price_change_percentage_7d', 0):.2f}%")
                 st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
                 st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
 
+        # Nansen On-chain Insights section
+        if nansen_data:
+            st.markdown("### 🕵️ Nansen On-chain Insights")
+            
+            # Display Token Screener data
+            if nansen_data.get("token_screener"):
+                st.subheader("🔹 Token Screener")
+                screener_items = nansen_data["token_screener"]
+                if screener_items:
+                    for item in screener_items:
+                        st.write(f"**Chain:** {item.get('chain_id', 'N/A').replace('_', ' ').title()}")
+                        st.write(f"- Market Cap: ${item.get('market_cap', 0):,.0f}")
+                        st.write(f"- 24h Volume: ${item.get('volume_24h', 0):,.0f}")
+                        st.write(f"- Price: ${item.get('current_price', 0):,.4f}")
+                        st.write(f"- 24h Price Change: {item.get('price_change_percentage_24h', 0):.2f}%")
+                        st.write(f"- On-chain Score (Nansen): {item.get('onchain_score', 'N/A')}")
+                        st.markdown("---")
+                else:
+                    st.info("No token screener data available from Nansen for this token/chain combination.")
+
+            # Display Flow Intelligence data
+            if nansen_data.get("flow_intelligence"):
+                st.subheader("🔹 Flow Intelligence")
+                flow_items = nansen_data["flow_intelligence"]
+                if flow_items:
+                    # Nansen flow_intelligence returns a list, even for a single token [2]
+                    flow_summary = flow_items[0].get("summary", {}) if flow_items else {}
+                    if flow_summary:
+                        st.write(f"**Net Flows (Last 24h):**")
+                        st.write(f"- Smart Money: ${flow_summary.get('smart_money_net_flow_usd_24h', 0):,.0f}")
+                        st.write(f"- Exchanges: ${flow_summary.get('exchange_net_flow_usd_24h', 0):,.0f}")
+                        st.write(f"- Top PnL Traders: ${flow_summary.get('top_pnl_traders_net_flow_usd_24h', 0):,.0f}")
+                        st.write(f"- Whales: ${flow_summary.get('whales_net_flow_usd_24h', 0):,.0f}")
+                        st.write(f"- Public Figures: ${flow_summary.get('public_figures_net_flow_usd_24h', 0):,.0f}")
+                        st.write(f"- Fresh Wallets: ${flow_summary.get('fresh_wallets_net_flow_usd_24h', 0):,.0f}")
+                    else:
+                        st.info("No flow intelligence summary available.")
+                else:
+                    st.info("No flow intelligence data available from Nansen.")
+
+            # Display Smart Money Inflows data
+            if nansen_data.get("smart_money_inflows"):
+                st.subheader("🔹 Smart Money Inflows/Outflows (Last 24h)")
+                sm_inflows_data = nansen_data["smart_money_inflows"]
+                if sm_inflows_data:
+                    sm_data = sm_inflows_data[0] if sm_inflows_data else {} # assuming it returns a single object for the queried token/chain [2]
+                    if sm_data:
+                        st.write(f"- Total Net Flow: **${sm_data.get('net_flow', 0):,.0f}**")
+                        st.write(f"- Buy Volume: ${sm_data.get('buy_volume', 0):,.0f}")
+                        st.write(f"- Sell Volume: ${sm_data.get('sell_volume', 0):,.0f}")
+                        st.write(f"- Unique Wallets Bought: {sm_data.get('unique_wallets_bought', 0)}")
+                        st.write(f"- Unique Wallets Sold: {sm_data.get('unique_wallets_sold', 0)}")
+                    else:
+                        st.info("No Smart Money inflows data available.")
+                else:
+                    st.info("No Smart Money inflows data available from Nansen.")
+
+            # Display Top Holders data
+            if nansen_data.get("holders"):
+                st.subheader("🔹 Top Holders Distribution")
+                holders_data = nansen_data["holders"]
+                if holders_data:
+                    for holder_type, holders_list in holders_data.items():
+                        if holders_list:
+                            st.write(f"**{holder_type.replace('_', ' ').title()}:**")
+                            df_holders = pd.DataFrame(holders_list)
+                            if not df_holders.empty:
+                                df_holders_display = df_holders[['address', 'amount', 'percentage']].copy()
+                                df_holders_display['address'] = df_holders_display['address'].apply(lambda x: f"{x[:6]}...{x[-4:]}")
+                                df_holders_display['amount'] = df_holders_display['amount'].apply(lambda x: f"{x:,.0f}")
+                                df_holders_display['percentage'] = df_holders_display['percentage'].apply(lambda x: f"{x:.2f}%")
+                                st.dataframe(df_holders_display, hide_index=True)
+                            else:
+                                st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
+                        else:
+                            st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
+                    st.markdown("---")
+                else:
+                    st.info("No Nansen top holders data available.")
+        else:
+            st.info("Nansen on-chain data not available. Ensure Nansen API key is configured and token data is fetched successfully.")
+
+
+        # Additional market insights (existing content)
+        st.markdown("### 🌐 DeFi Market Context (from DefiLlama Pools)")
+        
+        if pools:
+            # Chain distribution analysis
+            chain_distribution = {}
+            for pool in pools[:20]:  # Top 20 pools
+                chain = pool.get("chain", "Unknown")
+                if chain not in chain_distribution:
+                    chain_distribution[chain] = {"count": 0, "total_tvl": 0, "avg_apy": []}
+                chain_distribution[chain]["count"] += 1
+                chain_distribution[chain]["total_tvl"] += pool.get("tvlUsd", 0)
+                chain_distribution[chain]["avg_apy"].append(pool.get("apy", 0))
+            
+            # Calculate averages
+            for chain in chain_distribution:
+                apys = chain_distribution[chain]["avg_apy"]
+                chain_distribution[chain]["avg_apy"] = sum(apys) / len(apys) if apys else 0
+            
+            st.markdown("#### 🌐 Chain Distribution (Top Opportunities)")
+            
+            chain_data = []
+            for chain, data in chain_distribution.items():
+                chain_data.append({
+                    "Chain": chain,
+                    "Pool Count": data["count"],
+                    "Total TVL": f"${data['total_tvl']/1000000:.1f}M",
+                    "Avg APY": f"{data['avg_apy']:.2f}%"
+                })
+            
+            df_chains = pd.DataFrame(chain_data)
+            st.dataframe(df_chains, use_container_width=True)
 
 if __name__ == "__main__":
     setup_playwright()
-
     main()
