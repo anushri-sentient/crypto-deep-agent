@@ -23,8 +23,6 @@ DEFILLAMA_POOLS_API = "https://yields.llama.fi/pools"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-NANSEN_API_KEY = os.getenv("NANSEN_API_KEY")
-NANSEN_API_BASE_URL = "https://api.nansen.ai/api/beta"
 
 ALLOWED_PROJECTS = [
     "pendle", "compound-v3", "compound-v2", "beefy", "aave-v3", "aave-v2",
@@ -402,109 +400,6 @@ def get_news_summary(token, pools=None):
         logging.error(f"Error fetching news: {e}")
         return "Unable to fetch recent news at this time.", []
 
-# Nansen API Integration
-NANSEN_CHAIN_MAPPING = {
-    "ethereum": "ethereum",
-    "binance-smart-chain": "bsc", # Nansen uses 'bsc' for Binance Smart Chain
-    "polygon-pos": "polygon",
-    "arbitrum-one": "arbitrum",
-    "optimistic-ethereum": "optimism",
-    "solana": "solana",
-    "avalanche": "avalanche", # CoinGecko uses 'avalanche', Nansen also 'avalanche'
-    "base": "base",
-    "linea": "linea",
-    "fantom": "fantom",
-    "celo": "celo",
-    "gnosis": "gnosis", # Nansen uses 'xdai' for Gnosis Chain (formerly xDAI)
-    "moonriver": "moonriver",
-    "moonbeam": "moonbeam",
-    "cronos": "cronos",
-    "kava": "kava",
-    "zksync": "zksync",
-    "scroll": "scroll",
-    "mantle": "mantle",
-    "blast": "blast",
-    # Add more mappings as needed, cross-referencing CoinGecko platforms to Nansen chain_ids
-}
-
-def normalize_contract_address(address):
-    if isinstance(address, list):
-        if len(address) == 0:
-            return None
-        first_item = address[0]
-        if isinstance(first_item, dict):
-            # Try common keys for address
-            for key in ("address", "contract", "contract_address"):
-                if key in first_item and isinstance(first_item[key], str):
-                    return first_item[key].lower()
-            # If no known key found, fail gracefully
-            return None
-        elif isinstance(first_item, str):
-            return first_item.lower()
-        else:
-            return None
-    elif isinstance(address, dict):
-        # If it's a dict, try to find address string inside
-        for key in ("address", "contract", "contract_address"):
-            if key in address and isinstance(address[key], str):
-                return address[key].lower()
-        return None
-    elif isinstance(address, str):
-        return address.lower()
-    else:
-        return None
-
-
-def fetch_nansen_onchain_data(chain_id_for_nansen, contract_address_for_nansen, coingecko_symbol, nansen_headers):
-    results = {}
-
-    contract_addr = normalize_contract_address(contract_address_for_nansen)
-    if not contract_addr or not chain_id_for_nansen:
-        logging.warning(f"Missing or invalid data for Nansen call: {coingecko_symbol}")
-        return None
-
-    try:
-        payload = {
-            "chain_id": chain_id_for_nansen,
-            "contract_addresses": [contract_addr]
-        }
-        r = requests.post(f"{NANSEN_API_BASE_URL}/tgm/flow-intelligence", headers=nansen_headers, json=payload)
-        r.raise_for_status()
-        results["flow_intelligence"] = r.json().get("data")
-    except Exception as e:
-        logging.error(f"Error fetching flow-intelligence: {e}")
-        results["flow_intelligence"] = None
-
-
-    # 2. Smart Money Inflows
-    try:
-        payload = {
-            "chain_id": chain_id_for_nansen,
-            "contract_address": contract_address_for_nansen.lower(),
-            "time_range": "24h"
-        }
-        r = requests.post(f"{NANSEN_API_BASE_URL}/smart-money/inflows", headers=nansen_headers, json=payload)
-        r.raise_for_status()
-        results["smart_money_inflows"] = r.json().get("data")
-    except Exception as e:
-        logging.error(f"Error fetching smart-money-inflows: {e}")
-        results["smart_money_inflows"] = None
-
-    # 3. Holders
-    try:
-        payload = {
-            "chain_id": chain_id_for_nansen,
-            "token_address": contract_address_for_nansen.lower(),
-            "limit": 5
-        }
-        r = requests.post(f"{NANSEN_API_BASE_URL}/tgm/holders", headers=nansen_headers, json=payload)
-        r.raise_for_status()
-        results["holders"] = r.json().get("data")
-    except Exception as e:
-        logging.error(f"Error fetching holders: {e}")
-        results["holders"] = None
-
-    return results
 
 # UI Components (Keeping existing functions and adding Nansen display)
 def create_token_info_card(token_data):
@@ -905,22 +800,9 @@ def main():
         st.info("👆 Enter a token symbol above to start exploring yield opportunities")
         return
 
-    nansen_data = None # Initialize Nansen data
     with st.spinner("🔄 Fetching token data and yield opportunities..."):
         token_data = fetch_coingecko_token_data(token)
         pools = fetch_yield_opportunities(token)
-        coingecko_symbol = token_data.get("symbol", "").lower()
-        nansen_headers = {
-            "x-api-key": NANSEN_API_KEY,
-            "Content-Type": "application/json"
-        }
-
-
-
-        if token_data and token_data.get("token_data"):
-            # Fetch Nansen data using the full CoinGecko token info and the pools
-
-            nansen_data = fetch_nansen_onchain_data(token_data["token_data"], pools, coingecko_symbol, nansen_headers)
 
     if not pools:
         st.warning(f"❌ No suitable yield pools found for token '{token.upper()}'")
@@ -950,85 +832,6 @@ def main():
                 st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
                 st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
             
-            if nansen_data:
-                st.markdown("### 🕵️ Nansen On-chain Insights")
-                # Display Token Screener data
-                if nansen_data.get("token_screener"):
-                    st.subheader("🔹 Token Screener")
-                    screener_items = nansen_data["token_screener"]
-                    if screener_items:
-                        for item in screener_items:
-                            st.write(f"**Chain:** {item.get('chain_id', 'N/A').replace('_', ' ').title()}")
-                            st.write(f"- Market Cap: ${item.get('market_cap', 0):,.0f}")
-                            st.write(f"- 24h Volume: ${item.get('volume_24h', 0):,.0f}")
-                            st.write(f"- Price: ${item.get('current_price', 0):,.4f}")
-                            st.write(f"- 24h Price Change: {item.get('price_change_percentage_24h', 0):.2f}%")
-                            st.write(f"- On-chain Score (Nansen): {item.get('onchain_score', 'N/A')}")
-                            st.markdown("---")
-                    else:
-                        st.info("No token screener data available from Nansen for this token/chain combination.")
-
-                # Display Flow Intelligence data
-                if nansen_data.get("flow_intelligence"):
-                    st.subheader("🔹 Flow Intelligence")
-                    flow_items = nansen_data["flow_intelligence"]
-                    if flow_items:
-                        flow_summary = flow_items[0].get("summary", {}) if flow_items else {}
-                        if flow_summary:
-                            st.write(f"**Net Flows (Last 24h):**")
-                            st.write(f"- Smart Money: ${flow_summary.get('smart_money_net_flow_usd_24h', 0):,.0f}")
-                            st.write(f"- Exchanges: ${flow_summary.get('exchange_net_flow_usd_24h', 0):,.0f}")
-                            st.write(f"- Top PnL Traders: ${flow_summary.get('top_pnl_traders_net_flow_usd_24h', 0):,.0f}")
-                            st.write(f"- Whales: ${flow_summary.get('whales_net_flow_usd_24h', 0):,.0f}")
-                            st.write(f"- Public Figures: ${flow_summary.get('public_figures_net_flow_usd_24h', 0):,.0f}")
-                            st.write(f"- Fresh Wallets: ${flow_summary.get('fresh_wallets_net_flow_usd_24h', 0):,.0f}")
-                        else:
-                            st.info("No flow intelligence summary available.")
-                    else:
-                        st.info("No flow intelligence data available from Nansen.")
-
-                # Display Smart Money Inflows data
-                if nansen_data.get("smart_money_inflows"):
-                    st.subheader("🔹 Smart Money Inflows/Outflows (Last 24h)")
-                    sm_inflows_data = nansen_data["smart_money_inflows"]
-                    if sm_inflows_data:
-                        sm_data = sm_inflows_data[0] if sm_inflows_data else {} 
-                        if sm_data:
-                            st.write(f"- Total Net Flow: **${sm_data.get('net_flow', 0):,.0f}**")
-                            st.write(f"- Buy Volume: ${sm_data.get('buy_volume', 0):,.0f}")
-                            st.write(f"- Sell Volume: ${sm_data.get('sell_volume', 0):,.0f}")
-                            st.write(f"- Unique Wallets Bought: {sm_data.get('unique_wallets_bought', 0)}")
-                            st.write(f"- Unique Wallets Sold: {sm_data.get('unique_wallets_sold', 0)}")
-                        else:
-                            st.info("No Smart Money inflows data available.")
-                    else:
-                        st.info("No Smart Money inflows data available from Nansen.")
-
-                # Display Top Holders data
-                if nansen_data.get("holders"):
-                    st.subheader("🔹 Top Holders Distribution")
-                    holders_data = nansen_data["holders"]
-                    if holders_data:
-                        for holder_type, holders_list in holders_data.items():
-                            if holders_list:
-                                st.write(f"**{holder_type.replace('_', ' ').title()}:**")
-                                df_holders = pd.DataFrame(holders_list)
-                                if not df_holders.empty:
-                                    df_holders_display = df_holders[['address', 'amount', 'percentage']].copy()
-                                    df_holders_display['address'] = df_holders_display['address'].apply(lambda x: f"{x[:6]}...{x[-4:]}")
-                                    df_holders_display['amount'] = df_holders_display['amount'].apply(lambda x: f"{x:,.0f}")
-                                    df_holders_display['percentage'] = df_holders_display['percentage'].apply(lambda x: f"{x:.2f}%")
-                                    st.dataframe(df_holders_display, hide_index=True)
-                                else:
-                                    st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
-                            else:
-                                st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
-                        st.markdown("---")
-                    else:
-                        st.info("No Nansen top holders data available.")
-            else:
-                st.info("Nansen on-chain data not available. Ensure Nansen API key is configured and token data is fetched successfully.")
-        return # Exit if no pools
 
     if token_data:
         create_token_info_card(token_data)
@@ -1244,88 +1047,7 @@ def main():
                 st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
                 st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
 
-        # Nansen On-chain Insights section
-        if nansen_data:
-            st.markdown("### 🕵️ Nansen On-chain Insights")
-            
-            # Display Token Screener data
-            if nansen_data.get("token_screener"):
-                st.subheader("🔹 Token Screener")
-                screener_items = nansen_data["token_screener"]
-                if screener_items:
-                    for item in screener_items:
-                        st.write(f"**Chain:** {item.get('chain_id', 'N/A').replace('_', ' ').title()}")
-                        st.write(f"- Market Cap: ${item.get('market_cap', 0):,.0f}")
-                        st.write(f"- 24h Volume: ${item.get('volume_24h', 0):,.0f}")
-                        st.write(f"- Price: ${item.get('current_price', 0):,.4f}")
-                        st.write(f"- 24h Price Change: {item.get('price_change_percentage_24h', 0):.2f}%")
-                        st.write(f"- On-chain Score (Nansen): {item.get('onchain_score', 'N/A')}")
-                        st.markdown("---")
-                else:
-                    st.info("No token screener data available from Nansen for this token/chain combination.")
-
-            # Display Flow Intelligence data
-            if nansen_data.get("flow_intelligence"):
-                st.subheader("🔹 Flow Intelligence")
-                flow_items = nansen_data["flow_intelligence"]
-                if flow_items:
-                    # Nansen flow_intelligence returns a list, even for a single token [2]
-                    flow_summary = flow_items[0].get("summary", {}) if flow_items else {}
-                    if flow_summary:
-                        st.write(f"**Net Flows (Last 24h):**")
-                        st.write(f"- Smart Money: ${flow_summary.get('smart_money_net_flow_usd_24h', 0):,.0f}")
-                        st.write(f"- Exchanges: ${flow_summary.get('exchange_net_flow_usd_24h', 0):,.0f}")
-                        st.write(f"- Top PnL Traders: ${flow_summary.get('top_pnl_traders_net_flow_usd_24h', 0):,.0f}")
-                        st.write(f"- Whales: ${flow_summary.get('whales_net_flow_usd_24h', 0):,.0f}")
-                        st.write(f"- Public Figures: ${flow_summary.get('public_figures_net_flow_usd_24h', 0):,.0f}")
-                        st.write(f"- Fresh Wallets: ${flow_summary.get('fresh_wallets_net_flow_usd_24h', 0):,.0f}")
-                    else:
-                        st.info("No flow intelligence summary available.")
-                else:
-                    st.info("No flow intelligence data available from Nansen.")
-
-            # Display Smart Money Inflows data
-            if nansen_data.get("smart_money_inflows"):
-                st.subheader("🔹 Smart Money Inflows/Outflows (Last 24h)")
-                sm_inflows_data = nansen_data["smart_money_inflows"]
-                if sm_inflows_data:
-                    sm_data = sm_inflows_data[0] if sm_inflows_data else {} # assuming it returns a single object for the queried token/chain [2]
-                    if sm_data:
-                        st.write(f"- Total Net Flow: **${sm_data.get('net_flow', 0):,.0f}**")
-                        st.write(f"- Buy Volume: ${sm_data.get('buy_volume', 0):,.0f}")
-                        st.write(f"- Sell Volume: ${sm_data.get('sell_volume', 0):,.0f}")
-                        st.write(f"- Unique Wallets Bought: {sm_data.get('unique_wallets_bought', 0)}")
-                        st.write(f"- Unique Wallets Sold: {sm_data.get('unique_wallets_sold', 0)}")
-                    else:
-                        st.info("No Smart Money inflows data available.")
-                else:
-                    st.info("No Smart Money inflows data available from Nansen.")
-
-            # Display Top Holders data
-            if nansen_data.get("holders"):
-                st.subheader("🔹 Top Holders Distribution")
-                holders_data = nansen_data["holders"]
-                if holders_data:
-                    for holder_type, holders_list in holders_data.items():
-                        if holders_list:
-                            st.write(f"**{holder_type.replace('_', ' ').title()}:**")
-                            df_holders = pd.DataFrame(holders_list)
-                            if not df_holders.empty:
-                                df_holders_display = df_holders[['address', 'amount', 'percentage']].copy()
-                                df_holders_display['address'] = df_holders_display['address'].apply(lambda x: f"{x[:6]}...{x[-4:]}")
-                                df_holders_display['amount'] = df_holders_display['amount'].apply(lambda x: f"{x:,.0f}")
-                                df_holders_display['percentage'] = df_holders_display['percentage'].apply(lambda x: f"{x:.2f}%")
-                                st.dataframe(df_holders_display, hide_index=True)
-                            else:
-                                st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
-                        else:
-                            st.info(f"No {holder_type.replace('_', ' ').lower()} data found.")
-                    st.markdown("---")
-                else:
-                    st.info("No Nansen top holders data available.")
-        else:
-            st.info("Nansen on-chain data not available. Ensure Nansen API key is configured and token data is fetched successfully.")
-
+    
 
         # Additional market insights (existing content)
         st.markdown("### 🌐 DeFi Market Context (from DefiLlama Pools)")
