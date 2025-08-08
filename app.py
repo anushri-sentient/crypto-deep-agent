@@ -8,152 +8,69 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 import openai
-import re
-from report import generate_pool_analysis  # Updated import
 import subprocess
 import sys
-from optimizer import create_portfolio_optimizer
+import re
+from report import generate_pool_analysis
+from dex_utils import (
+    get_dexscreener_pair_data,
+    get_pool_analytics,
+    format_number,
+    format_percentage,
+    find_pair_for_pool,
+    build_dexscreener_url_from_pair,
+)
 
 # Configuration
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Constants
+# API Constants
 DEFILLAMA_POOLS_API = "https://yields.llama.fi/pools"
+DEFILLAMA_PROTOCOLS_API = "https://api.llama.fi/protocols"
+DEFILLAMA_CHART_API = "https://yields.llama.fi/chart"
 COINGECKO_API = "https://api.coingecko.com/api/v3"
+DEXSCREENER_API = "https://api.dexscreener.com/latest"
 EXA_API_KEY = os.getenv("EXA_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-ALLOWED_PROJECTS = [
-    "pendle", "compound-v3", "compound-v2", "beefy", "aave-v3", "aave-v2",
-    "uniswap-v3", "uniswap-v2", "euler-v2", "curve-dex", "aerodrome-slipstream",
-    "aerodrome-v1", "morpho"
-]
+# Cache for top 50 coins
+TOP_50_COINS_CACHE = None
+TOP_50_COINS_CACHE_TIME = None
 
-SIMPLE_STAKING_PROJECTS = [
-    "lido", "binance-staked-eth", "rocket-pool", "stakewise-v2",
-    "meth-protocol", "liquid-collective", "binance-staked-sol",
-    "marinade-liquid-staking", "benqi-staked-avax", "jito-liquid-staking"
-]
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_dexscreener_data(pair_address=None, token_symbol=None):
+    """Fetch data from DexScreener API"""
+    try:
+        if pair_address:
+            url = f"{DEXSCREENER_API}/dex/pairs/{pair_address}"
+        elif token_symbol:
+            url = f"{DEXSCREENER_API}/dex/search?q={token_symbol}"
+        else:
+            return None
+            
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        
+        return data
+    except Exception as e:
+        logging.error(f"Error fetching DexScreener data: {e}")
+        return None
 
-# Styling
-def load_custom_css():
-    """Load custom CSS styles for the application"""
-    st.markdown("""
-    <style>
-    .main { padding-top: 1rem; }
-
-    .token-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 2rem;
-        border-radius: 20px;
-        margin: 1rem 0;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        border: 1px solid rgba(255,255,255,0.1);
-    }
-
-    .pool-card {
-        border-radius: 20px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        box-shadow: 0 8px 25px rgba(0,0,0,0.1);
-        border: 1px solid #e5e7eb;
-        transition: all 0.3s ease;
-        background: white;
-    }
-
-    .pool-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 12px 35px rgba(0,0,0,0.15);
-    }
-
-    .risk-low { border-left: 5px solid #10b981; background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); }
-    .risk-medium { border-left: 5px solid #f59e0b; background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); }
-    .risk-high { border-left: 5px solid #ef4444; background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); }
-
-    .portfolio-summary {
-        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-        color: white;
-        padding: 2rem;
-        border-radius: 20px;
-        margin: 1rem 0;
-        box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3);
-    }
-
-    .ai-summary {
-        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
-        border-left: 4px solid #6366f1;
-        margin: 1rem 0;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
-    }
-
-    .comprehensive-report {
-        background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
-        border-left: 4px solid #f59e0b;
-        margin: 1rem 0;
-        box-shadow: 0 4px 15px rgba(245, 158, 11, 0.1);
-    }
-
-    .breakdown-report {
-        background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-        padding: 1.5rem;
-        border-radius: 15px;
-        border-left: 4px solid #3b82f6;
-        margin: 1rem 0;
-        box-shadow: 0 4px 15px rgba(59, 130, 246, 0.1);
-    }
-
-    .strategy-badge {
-        display: inline-block;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        margin: 0.2rem;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    .report-type-selector {
-        background: white;
-        padding: 1rem;
-        border-radius: 15px;
-        border: 2px solid #e5e7eb;
-        margin: 1rem 0;
-    }
-
-    .badge-staking { background: #dbeafe; color: #1e40af; }
-    .badge-lending { background: #dcfce7; color: #166534; }
-    .badge-farming { background: #fef3c7; color: #92400e; }
-    .badge-vault { background: #e7e5e4; color: #44403c; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# Classification Functions (keeping existing functions)
-def classify_pool_type(pool):
-    """Classify the pool type based on project and symbol"""
-    name = pool.get("pool", "").lower()
-    project = pool.get("project", "").lower()
-    symbol = pool.get("symbol", "").lower()
-
-    if project in SIMPLE_STAKING_PROJECTS:
-        return "Simple Staking"
-    if any(token in symbol for token in ["steth", "cbeth", "wbeth", "stsol", "stavax"]) and ("lp" in name or "pool" in name):
-        return "Staking on LP"
-    if "aave" in project or "compound" in project or project in ["venus", "morpho"]:
-        return "Lending"
-    if ("usdc" in symbol and "eth" in symbol) or "lp" in name or "curve" in project or "uniswap" in project:
-        return "LP Farming (DEX)"
-    if project in ["yearn", "beefy", "autofarm", "reaper"]:
-        return "Vault"
-    if pool.get("apy", 0) > 30 or pool.get("tvlUsd", 0) < 500_000:
-        return "High-Risk Farm"
-    return "Other"
+@st.cache_data(ttl=300)
+def get_dex_pair_info(pool, debug=False):
+    """Get DEX pair information for a pool using enhanced chain mapping"""
+    try:
+        # Use the enhanced find_pair_for_pool function from dex_utils
+        # This properly handles chain mapping and pair resolution
+        from dex_utils import find_pair_for_pool
+        
+        pair_data = find_pair_for_pool(pool, debug=debug)
+        return pair_data
+    except Exception as e:
+        logging.error(f"Error getting DEX pair info: {e}")
+        return None
 
 def setup_playwright():
     try:
@@ -176,69 +93,790 @@ def setup_playwright():
             print(f"❌ Failed to install Playwright browsers: {e}")
             return False
 
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def fetch_pool_chart(pool_id):
+    """Fetch historical APY and TVL chart data for a pool"""
+    try:
+        url = f"{DEFILLAMA_CHART_API}/{pool_id}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('data', [])
+    except Exception as e:
+        logging.error(f"Error fetching chart data for pool {pool_id}: {e}")
+        return []
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def fetch_top_50_coins():
+    """Fetch top 50 cryptocurrencies by market cap"""
+    try:
+        url = f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=false"
+        response = requests.get(url)
+        response.raise_for_status()
+        coins = response.json()
+        
+        # Create a set of coin symbols for fast lookup
+        top_50_symbols = set()
+        for coin in coins:
+            symbol = coin.get('symbol', '').lower()
+            if symbol:
+                top_50_symbols.add(symbol)
+        
+        return top_50_symbols
+    except Exception as e:
+        logging.error(f"Error fetching top 50 coins: {e}")
+        return set()
+
+def is_coin_in_top_50(symbol):
+    """Check if a coin symbol is in the top 50 by market cap"""
+    global TOP_50_COINS_CACHE, TOP_50_COINS_CACHE_TIME
+    
+    current_time = datetime.now()
+    
+    # Refresh cache every hour
+    if (TOP_50_COINS_CACHE is None or 
+        TOP_50_COINS_CACHE_TIME is None or 
+        (current_time - TOP_50_COINS_CACHE_TIME).seconds > 3600):
+        
+        TOP_50_COINS_CACHE = fetch_top_50_coins()
+        TOP_50_COINS_CACHE_TIME = current_time
+    
+    # Special handling for wrapped tokens
+    wrapped_token_mapping = {
+        'weth': 'eth',
+        'wbtc': 'btc',
+        'wmatic': 'matic',
+        'wavax': 'avax',
+        'wbnb': 'bnb',
+        'wftm': 'ftm',
+        'wone': 'one',
+        'wcelo': 'celo',
+        'wmovr': 'movr',
+        'wglmr': 'glmr',
+        'wrose': 'rose',
+        'wcfx': 'cfx',
+        'wbtc': 'btc',
+        'weth': 'eth',
+    }
+    
+    symbol_lower = symbol.lower()
+    
+    # Check if it's a wrapped token
+    if symbol_lower in wrapped_token_mapping:
+        return wrapped_token_mapping[symbol_lower] in TOP_50_COINS_CACHE
+    
+    return symbol_lower in TOP_50_COINS_CACHE
+
+def get_top_50_coins_display():
+    """Get a display string of top 50 coins for UI"""
+    global TOP_50_COINS_CACHE
+    
+    if TOP_50_COINS_CACHE is None:
+        TOP_50_COINS_CACHE = fetch_top_50_coins()
+    
+    # Get first 20 coins for display
+    top_coins_list = sorted(list(TOP_50_COINS_CACHE))[:20]
+    return ", ".join([coin.upper() for coin in top_coins_list]) + "..."
+
+def debug_high_risk_filtering(pools):
+    """Debug function to show high-risk filtering process"""
+    if not st.session_state.get("show_debug_logs", False):
+        return
+    
+    st.markdown("### 🔍 High-Risk Filtering Debug")
+    
+    # Show the actual top 50 coins being used
+    top_50_coins = fetch_top_50_coins()
+    st.markdown(f"**Top 50 Coins Used for Filtering:** {', '.join(sorted(list(top_50_coins))[:30])}...")
+    
+    total_high_risk = 0
+    filtered_high_risk = 0
+    
+    for pool in pools:
+        if classify_risk(pool) == "High":
+            total_high_risk += 1
+            symbol = pool.get("symbol", "").lower()
+            symbol_parts = re.split(r'[-/\s]+', symbol)
+            
+            # Check if both tokens are in top 50
+            if symbol_parts and len(symbol_parts) >= 2:
+                token1 = symbol_parts[0].strip()
+                token2 = symbol_parts[1].strip()
+                
+                if (token1 and token2 and 
+                    is_coin_in_top_50(token1) and 
+                    is_coin_in_top_50(token2)):
+                    
+                    filtered_high_risk += 1
+                    st.success(f"✅ {pool.get('symbol', 'N/A')} - Both tokens {token1.upper()} and {token2.upper()} are in top 50 (APY: {pool.get('apy', 0):.1f}%)")
+                else:
+                    missing_tokens = []
+                    if not is_coin_in_top_50(token1):
+                        missing_tokens.append(token1.upper())
+                    if not is_coin_in_top_50(token2):
+                        missing_tokens.append(token2.upper())
+                    st.error(f"❌ {pool.get('symbol', 'N/A')} - Missing from top 50: {', '.join(missing_tokens)}")
+    
+    st.info(f"📊 Filtering Results: {filtered_high_risk}/{total_high_risk} high-risk pools contain top 50 coins")
+
+def test_top_50_filtering():
+    """Test function to verify top 50 filtering logic"""
+    if not st.session_state.get("show_debug_logs", False):
+        return
+    
+    st.markdown("### 🧪 Top 50 Filtering Test")
+    
+    top_50_coins = fetch_top_50_coins()
+    
+    # Test cases
+    test_pools = [
+        "BTC-USDC",  # Should be included (both BTC and USDC are top 50)
+        "ETH-USDT",  # Should be included (both ETH and USDT are top 50)
+        "WETH-USDC", # Should be included (both WETH and USDC are top 50)
+        "CRCL-WETH", # Should be excluded (CRCL is not top 50)
+        "SBET-WETH", # Should be excluded (SBET is not top 50)
+        "TRUMP-WETH", # Should be excluded (TRUMP is not top 50)
+        "SOL-USDC",  # Should be included (both SOL and USDC are top 50)
+        "ADA-USDT",  # Should be included (both ADA and USDT are top 50)
+    ]
+    
+    st.markdown("**Test Cases:**")
+    for test_pool in test_pools:
+        symbol_parts = re.split(r'[-/\s]+', test_pool.lower())
+        
+        if symbol_parts and len(symbol_parts) >= 2:
+            token1 = symbol_parts[0].strip()
+            token2 = symbol_parts[1].strip()
+            
+            if (token1 and token2 and 
+                is_coin_in_top_50(token1) and 
+                is_coin_in_top_50(token2)):
+                st.success(f"✅ {test_pool} - Both tokens {token1.upper()} and {token2.upper()} are in top 50")
+            else:
+                missing_tokens = []
+                if not is_coin_in_top_50(token1):
+                    missing_tokens.append(token1.upper())
+                if not is_coin_in_top_50(token2):
+                    missing_tokens.append(token2.upper())
+                st.error(f"❌ {test_pool} - Missing from top 50: {', '.join(missing_tokens)}")
+    
+    # Show some actual top 50 coins
+    st.markdown(f"**Sample Top 50 Coins:** {', '.join(sorted(list(top_50_coins))[:30])}...")
+
+def filter_high_risk_pools(pools):
+    """Filter high-risk pools to only include top 50 coins, sorted by APY"""
+    high_risk_pools = []
+    top_50_coins = fetch_top_50_coins()
+    
+    for pool in pools:
+        if classify_risk(pool) == "High":
+            symbol = pool.get("symbol", "").lower()
+            
+            # More sophisticated token extraction
+            # Handle common patterns like "TOKEN1-TOKEN2", "TOKEN1/TOKEN2", "TOKEN1 TOKEN2"
+            symbol_parts = re.split(r'[-/\s]+', symbol)
+            
+            # Only include if BOTH tokens are in top 50
+            if symbol_parts and len(symbol_parts) >= 2:
+                token1 = symbol_parts[0].strip()
+                token2 = symbol_parts[1].strip()
+                
+                if (token1 and token2 and 
+                    is_coin_in_top_50(token1) and 
+                    is_coin_in_top_50(token2)):
+                    
+                    high_risk_pools.append(pool)
+                    
+                    # Debug logging
+                    if st.session_state.get("show_debug_logs", False):
+                        st.success(f"✅ {pool.get('symbol', 'N/A')} - Both tokens {token1.upper()} and {token2.upper()} are in top 50 (APY: {pool.get('apy', 0):.1f}%)")
+                else:
+                    # Debug logging for excluded pools
+                    if st.session_state.get("show_debug_logs", False):
+                        missing_tokens = []
+                        if not is_coin_in_top_50(token1):
+                            missing_tokens.append(token1.upper())
+                        if not is_coin_in_top_50(token2):
+                            missing_tokens.append(token2.upper())
+                        st.error(f"❌ {pool.get('symbol', 'N/A')} - Missing from top 50: {', '.join(missing_tokens)}")
+    
+    # Sort by APY (highest first)
+    high_risk_pools.sort(key=lambda x: x.get("apy", 0), reverse=True)
+    
+    return high_risk_pools
+
+ALLOWED_PROJECTS = [
+    "pendle", "compound-v3", "compound-v2", "beefy", "aave-v3", "aave-v2",
+    "uniswap-v3", "uniswap-v2", "euler-v2", "curve-dex", "aerodrome-slipstream",
+    "aerodrome-v1", "morpho", "kamino", "raydium", "drift", "orca", 
+    "ratex", "exponent", "loopscale", "meteora", "jupiter"
+]
+
+SIMPLE_STAKING_PROJECTS = [
+    "lido", "binance-staked-eth", "rocket-pool", "stakewise-v2",
+    "meth-protocol", "liquid-collective", "binance-staked-sol",
+    "marinade-liquid-staking", "benqi-staked-avax", "jito-liquid-staking"
+]
+
+SIMPLE_STAKING_LP_TOKENS = [
+    "steth", "wsteth", "cbeth", "reth", "sfrxeth", "ankreth", "oseth", "lseth", "sweth", "ethx", "bedrock", "teth",
+    "stsol", "msol", "jsol", "bsol", "stavax", "savax", "ankrbnb", "stkbnb"
+]
+
+# Chain Score Multipliers
+CHAIN_SCORE_MULTIPLIERS = {
+    "ethereum": 1.25,
+    "arbitrum": 1.20,
+    "optimism": 1.20,
+    "polygon": 1.18,
+    "binance": 1.18,
+    "avalanche": 1.15,
+    "solana": 1.15,
+    "base": 1.15,
+    "zksync era": 1.12,
+    "linea": 1.10,
+    "scroll": 1.10,
+    "blast": 1.10,
+    "fantom": 1.08,
+    "gnosis": 1.07,
+    "celo": 1.06,
+    "kava": 1.05,
+    "metis": 1.05,
+    "polygon zkevm": 1.08,
+    "arbitrum nova": 1.05,
+}
+
+def load_custom_css():
+    """Load modern minimal CSS styles"""
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    /* Global Variables */
+    :root {
+        --primary-color: #6366f1;
+        --primary-light: #818cf8;
+        --success-color: #10b981;
+        --warning-color: #f59e0b;
+        --danger-color: #ef4444;
+        --text-primary: #1f2937;
+        --text-secondary: #6b7280;
+        --text-muted: #9ca3af;
+        --bg-primary: #ffffff;
+        --bg-secondary: #f9fafb;
+        --bg-card: #ffffff;
+        --border-color: #e5e7eb;
+        --border-radius: 12px;
+        --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+
+    /* Global Styles */
+    .main {
+        font-family: 'Inter', sans-serif !important;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+    }
+
+    /* Hero Section */
+    .hero-section {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-light) 100%);
+        padding: 2rem;
+        border-radius: var(--border-radius);
+        margin: 1rem 0;
+        text-align: center;
+        color: white;
+        box-shadow: var(--shadow-lg);
+    }
+
+    .hero-title {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin: 0 0 0.5rem 0;
+    }
+
+    .hero-subtitle {
+        font-size: 1.1rem;
+        opacity: 0.9;
+        margin: 0;
+        font-weight: 400;
+    }
+
+    /* Search Container */
+    .search-container {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius);
+        padding: 1.5rem;
+        margin: 1rem 0;
+        box-shadow: var(--shadow-sm);
+    }
+
+    /* Pool Cards */
+    .pool-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius);
+        padding: 1.25rem;
+        margin-bottom: 1rem;
+        transition: all 0.2s ease;
+        box-shadow: var(--shadow-sm);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .pool-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+        border-color: var(--primary-color);
+    }
+
+    .pool-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, var(--primary-color) 0%, var(--primary-light) 100%);
+        opacity: 0;
+        transition: opacity 0.2s ease;
+    }
+
+    .pool-card:hover::before {
+        opacity: 1;
+    }
+
+    /* Card Header */
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+    }
+
+    .card-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin: 0;
+        line-height: 1.3;
+    }
+
+    .card-subtitle {
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+        margin: 0.25rem 0 0 0;
+        font-weight: 400;
+    }
+
+    /* APY Badge */
+    .apy-badge {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-light) 100%);
+        color: white;
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        min-width: 70px;
+        text-align: center;
+        box-shadow: var(--shadow-sm);
+    }
+
+    .apy-badge.low-apy {
+        background: linear-gradient(135deg, var(--success-color) 0%, #34d399 100%);
+    }
+
+    .apy-badge.medium-apy {
+        background: linear-gradient(135deg, var(--warning-color) 0%, #fbbf24 100%);
+        color: white;
+    }
+
+    .apy-badge.high-apy {
+        background: linear-gradient(135deg, var(--danger-color) 0%, #f87171 100%);
+        color: white;
+    }
+
+    /* Large APY Badge for more prominence */
+    .apy-badge.large-apy {
+        font-size: 1.2rem;
+        font-weight: 700;
+        padding: 0.75rem 1rem;
+        min-width: 90px;
+        box-shadow: var(--shadow-md);
+        border: 2px solid rgba(255, 255, 255, 0.2);
+    }
+
+    /* Metrics Grid */
+    .card-metrics {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.75rem;
+        margin: 1rem 0;
+    }
+
+    .metric-item {
+        background: var(--bg-secondary);
+        border-radius: 8px;
+        padding: 0.75rem;
+        border: 1px solid var(--border-color);
+        transition: all 0.2s ease;
+    }
+
+    .metric-item:hover {
+        background: #f3f4f6;
+        transform: translateY(-1px);
+    }
+
+    .metric-label {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 500;
+        margin-bottom: 0.25rem;
+    }
+
+    .metric-value {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    /* Badges */
+    .badges-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 1rem 0;
+    }
+
+    .badge {
+        padding: 0.3rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.7rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        border: 1px solid var(--border-color);
+        background: var(--bg-secondary);
+        color: var(--text-secondary);
+    }
+
+    .badge.strategy {
+        background: rgba(99, 102, 241, 0.1);
+        color: var(--primary-color);
+        border-color: rgba(99, 102, 241, 0.2);
+    }
+
+    .badge.risk-low {
+        background: rgba(16, 185, 129, 0.1);
+        color: var(--success-color);
+        border-color: rgba(16, 185, 129, 0.2);
+    }
+
+    .badge.risk-high {
+        background: rgba(239, 68, 68, 0.1);
+        color: var(--danger-color);
+        border-color: rgba(239, 68, 68, 0.2);
+    }
+
+    /* Action Buttons */
+    .card-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .action-btn {
+        flex: 1;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        color: var(--text-secondary);
+        padding: 0.6rem 0.8rem;
+        border-radius: 8px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-decoration: none;
+        text-align: center;
+        display: inline-block;
+    }
+
+    .action-btn:hover {
+        background: var(--primary-color);
+        color: white;
+        transform: translateY(-1px);
+        text-decoration: none;
+        box-shadow: var(--shadow-md);
+    }
+
+    /* Section Headers */
+    .section-header {
+        margin: 2rem 0 1rem 0;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid var(--border-color);
+    }
+
+    .section-title {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin: 0;
+    }
+
+    /* Summary Cards */
+    .summary-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1rem;
+        margin: 1.5rem 0;
+    }
+
+    .summary-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius);
+        padding: 1.25rem;
+        text-align: center;
+        box-shadow: var(--shadow-sm);
+        transition: all 0.2s ease;
+    }
+
+    .summary-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+    }
+
+    .summary-value {
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: var(--text-primary);
+        margin: 0.5rem 0;
+    }
+
+    .summary-label {
+        color: var(--text-secondary);
+        font-size: 0.8rem;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    /* Token Info Card */
+    .token-info-card {
+        background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-light) 100%);
+        color: white;
+        border-radius: var(--border-radius);
+        padding: 1.5rem;
+        margin: 1.5rem 0;
+        box-shadow: var(--shadow-lg);
+    }
+
+    /* Responsive Design */
+    @media (max-width: 768px) {
+        .hero-title {
+            font-size: 2rem;
+        }
+        
+        .hero-subtitle {
+            font-size: 1rem;
+        }
+        
+        .card-metrics {
+            grid-template-columns: 1fr;
+        }
+        
+        .summary-cards {
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        }
+    }
+
+    /* Animations */
+    @keyframes fadeInUp {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .fade-in {
+        animation: fadeInUp 0.4s ease-out;
+    }
+
+    /* Source Badge */
+    .source-badge {
+        display: inline-block;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        padding: 0.2rem 0.5rem;
+        border-radius: 6px;
+        margin-left: 0.5rem;
+        text-decoration: none;
+        transition: all 0.2s ease;
+    }
+
+    .source-badge:hover {
+        background: var(--primary-color);
+        color: white;
+        text-decoration: none;
+    }
+
+    /* Streamlit Overrides */
+    .stButton > button {
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: var(--shadow-md) !important;
+    }
+
+    .stTextInput > div > div > input {
+        border-radius: 8px !important;
+        border: 1px solid var(--border-color) !important;
+    }
+
+    .stTextInput > div > div > input:focus {
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1) !important;
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0 !important;
+        background: var(--bg-secondary) !important;
+        border-radius: var(--border-radius) !important;
+        padding: 0.25rem !important;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 6px !important;
+        margin: 0 !important;
+        padding: 0.5rem 1rem !important;
+        background: transparent !important;
+        color: var(--text-secondary) !important;
+        font-weight: 500 !important;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: var(--primary-color) !important;
+        color: white !important;
+    }
+
+    /* Info/Warning/Success boxes */
+    .stAlert {
+        border-radius: var(--border-radius) !important;
+        border: none !important;
+        box-shadow: var(--shadow-sm) !important;
+    }
+
+    /* Dataframe styling */
+    .stDataFrame {
+        border-radius: var(--border-radius) !important;
+        overflow: hidden !important;
+    }
+
+    /* Metric styling */
+    .stMetric {
+        background: var(--bg-card) !important;
+        border-radius: var(--border-radius) !important;
+        padding: 1rem !important;
+        border: 1px solid var(--border-color) !important;
+        box-shadow: var(--shadow-sm) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Classification Functions (keeping existing logic)
+def classify_pool_type(pool):
+    """Classify the pool type based on project and symbol."""
+    name = pool.get("pool", "").lower()
+    project = pool.get("project", "").lower()
+    symbol = pool.get("symbol", "").lower()
+
+    if project in SIMPLE_STAKING_PROJECTS:
+        return "Staking"
+    
+    if any(token in symbol for token in SIMPLE_STAKING_LP_TOKENS) and ("lp" in name or "pool" in name):
+        return "Staking on LP"
+    
+    if "aave" in project or "compound" in project or project in ["venus", "morpho"]:
+        return "Money Market"
+    
+    if "uniswap" in project or "curve" in project or "lp" in name or ("usdc" in symbol and "eth" in symbol):
+        return "LP Farming"
+    
+    if project in ["yearn", "beefy", "autofarm", "reaper"]:
+        return "Vault"
+    
+    if pool.get("apy", 0) > 30 and pool.get("tvlUsd", 0) < 5_000_000:
+        return "Leveraged"
+    
+    return "Other"
+
 def classify_risk(pool):
-    """Classify risk level of a pool"""
-    il_risk = pool.get("ilRisk")
-    if il_risk is not None and str(il_risk).lower() == "no":
-        return "Low"
+    """Classify risk level based on IL Risk."""
+    il_risk = pool.get("ilRisk", "yes").lower()
+    return "Low" if il_risk == "no" else "High"
 
-    apy = pool.get("apy", 0)
-    tvl = pool.get("tvlUsd", 0)
-    strategy = classify_pool_type(pool)
-
-    if apy > 20 or tvl < 100_000:
-        return "High"
-
-    if strategy in ["Simple Staking", "Lending"]:
-        return "Low" if tvl > 5_000_000 and apy < 7 else "Medium"
-
-    if strategy in ["LP Farming (DEX)", "Vault", "Staking on LP"]:
-        if apy > 25:
-            return "High"
-        elif 5 <= apy <= 18 and tvl > 1_000_000:
-            return "Medium"
-        elif apy < 5 and tvl > 500_000 and str(il_risk).lower() == "no":
-            return "Low"
-        elif tvl > 10_000_000 and apy <= 20:
-            return "Medium"
-        return "High"
-
-    if tvl > 10_000_000 and apy < 5:
-        return "Low"
-    return "Medium" if 0.5 <= apy <= 10 else "High"
-
-def is_valid_pool(pool):
-    """Check if a pool meets validity criteria"""
+def is_valid_pool(pool, ignore_project_filter=False):
+    """Check if a pool meets validity criteria."""
     project = pool.get("project", "").lower()
     apy = pool.get("apy", 0)
     tvl = pool.get("tvlUsd", 0)
-    apy_7d = pool.get("apyBase7d") or apy
-    apy_30d = pool.get("apyMean30d") or apy
+    apy_7d = pool.get("apyBase7d")
+    apy_30d = pool.get("apyMean30d")
 
-    if project not in ALLOWED_PROJECTS and project not in SIMPLE_STAKING_PROJECTS:
+    if not ignore_project_filter and project not in ALLOWED_PROJECTS and project not in SIMPLE_STAKING_PROJECTS:
         return False
-    if tvl < 500_000 or apy > 100 or apy < 0.5:
+    
+    if tvl < 100_000:
         return False
-    if apy_30d and apy_30d > 0 and (apy_7d / apy_30d > 4):
+    
+    if apy < 0.1:
         return False
+    
+    if apy_7d is not None and apy_30d is not None and apy_30d > 0.001:
+        ratio = apy_7d / apy_30d
+        if ratio > 5 or ratio < 0.2:
+            return False
+            
     return True
 
 def score_pool(pool):
-    """Score a pool for ranking"""
-    tvl = pool.get("tvlUsd", 0)
+    """Score a pool for ranking based on risk level and metrics."""
     apy = pool.get("apy", 0)
-    risk_level = classify_risk(pool)
-
-    score = 0
-    if risk_level == "Low":
-        score = tvl * 0.0001 + apy * 10
-    elif risk_level == "Medium":
-        score = tvl * 0.00005 + apy * 20
+    tvl = pool.get("tvlUsd", 0)
+    chain = pool.get("chain", "").lower()
+    risk = classify_risk(pool)
+    
+    if risk == "High":
+        tvl_score = (tvl / 1_000_000) * 0.3
+        apy_score = apy * 0.7
+        score = apy_score + tvl_score
     else:
-        score = tvl * 0.00001 + apy * 30
+        score = apy
+    
+    chain_multiplier = CHAIN_SCORE_MULTIPLIERS.get(chain, 1.0)
+    score *= chain_multiplier
+
     return score
 
-# Data Fetching Functions (keeping existing functions)
+# Data Fetching Functions (keeping existing logic)
 @st.cache_data(ttl=300)
 def fetch_coingecko_token_data(token_id):
     """Fetch token data from CoinGecko API"""
@@ -286,7 +924,7 @@ def fetch_coingecko_token_data(token_id):
 
 @st.cache_data(ttl=300)
 def fetch_yield_opportunities(token):
-    """Fetch yield opportunities for a token"""
+    """Fetch yield opportunities for a specific token, applying project filters."""
     try:
         response = requests.get(DEFILLAMA_POOLS_API)
         response.raise_for_status()
@@ -303,14 +941,444 @@ def fetch_yield_opportunities(token):
             symbol = pool.get("symbol", "").lower()
             project = pool.get("project", "").lower()
 
-            if (token in symbol or token in project) and is_valid_pool(pool):
+            if (token in symbol or token in project) and is_valid_pool(pool, ignore_project_filter=False):
                 filtered_pools.append(pool)
 
         return filtered_pools
 
     except Exception as e:
-        st.error(f"Error fetching pools: {e}")
+        st.error(f"Error fetching pools for token: {e}")
         return []
+
+# UI Components
+def show_source_badge(name: str, href: str = None):
+    """Display source badge"""
+    if st.session_state.get("show_source_labels", True):
+        if href:
+            st.markdown(f'<a href="{href}" target="_blank" class="source-badge">📊 {name}</a>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<span class="source-badge">📊 {name}</span>', unsafe_allow_html=True)
+
+def display_dex_data(dex_data, pool):
+    """Display DexScreener data in a clean format"""
+    st.markdown("### 📊 DEX Market Data")
+    
+    # Basic pair info
+    pair_name = dex_data.get("pairAddress", "N/A")
+    dex_id = dex_data.get("dexId", "N/A")
+    chain_id = dex_data.get("chainId", "N/A")
+    
+    # Get pool chain for comparison
+    pool_chain = pool.get("chain", "N/A").title()
+    
+    # Price data
+    price_usd = dex_data.get("priceUsd", "N/A")
+    price_change_24h = dex_data.get("priceChange", {}).get("h24", 0)
+    
+    # Liquidity data
+    liquidity = dex_data.get("liquidity", {})
+    liquidity_usd = liquidity.get("usd", 0)
+    
+    # Volume data
+    volume = dex_data.get("volume", {})
+    volume_24h = volume.get("h24", 0)
+    
+    # Token info
+    base_token = dex_data.get("baseToken", {})
+    quote_token = dex_data.get("quoteToken", {})
+    
+    # Display in a clean layout
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Market Info**")
+        st.markdown(f"- **DEX**: {dex_id}")
+        st.markdown(f"- **Pool Chain**: {pool_chain}")
+        st.markdown(f"- **DEX Chain**: {chain_id}")
+        
+        # Show chain match status
+        if chain_id.lower() == pool_chain.lower():
+            st.success("✅ Chain Match: Pool and DEX data are from the same chain")
+        else:
+            st.warning(f"⚠️ Chain Mismatch: Pool is on {pool_chain}, DEX data is from {chain_id}")
+        
+        st.markdown(f"- **Pair**: {base_token.get('symbol', 'N/A')}/{quote_token.get('symbol', 'N/A')}")
+        
+        if price_usd != "N/A":
+            st.metric("Price USD", f"{float(price_usd):.6f}", f"{price_change_24h:+.2f}%")
+    
+    with col2:
+        st.markdown("**Liquidity & Volume**")
+        st.metric("Liquidity", f"{format_number(liquidity_usd)}")
+        st.metric("Volume (24h)", f"{format_number(volume_24h)}")
+    
+    # Additional metrics
+    if dex_data.get("fdv"):
+        st.metric("Fully Diluted Valuation", f"{format_number(dex_data['fdv'])}")
+    
+    # Links
+    st.markdown("**Links**")
+    col1, col2 = st.columns(2)
+    with col1:
+        if dex_data.get("url"):
+            st.markdown(f"[View on DexScreener]({dex_data['url']})")
+    with col2:
+        if dex_data.get("pairAddress"):
+            st.markdown(f"[Contract: {dex_data['pairAddress'][:10]}...](https://etherscan.io/address/{dex_data['pairAddress']})")
+
+def create_pool_card(pool, index=0):
+    """Create modern pool card using Streamlit components with inline DEX data"""
+    apy = pool.get("apy", 0)
+    tvl = pool.get("tvlUsd", 0)
+    symbol = pool.get("symbol", "N/A").upper()
+    project = pool.get("project", "N/A").title()
+    chain = pool.get("chain", "N/A").title()
+    pool_id = pool.get("pool", "")
+    il_risk = pool.get("ilRisk", "N/A")
+    
+    strategy = classify_pool_type(pool)
+    risk = classify_risk(pool)
+    
+    # APY badge styling
+    if apy < 8:
+        apy_class = "low-apy"
+    elif apy < 15:
+        apy_class = "medium-apy"
+    else:
+        apy_class = "high-apy"
+    
+    # Card styling based on strategy and risk
+    strategy_class = strategy.lower().replace(" ", "-")
+    risk_class = "low-risk" if risk == "Low" else "high-risk"
+    
+    # Combine strategy and risk for unique card styling
+    card_class = f"{strategy_class} {risk_class}"
+    
+    defillama_url = f"https://defillama.com/yields/pool/{pool_id}"
+    
+    # Create unique session state keys
+    breakdown_key = f"breakdown_{pool_id}_{index}"
+    comprehensive_key = f"comprehensive_{pool_id}_{index}"
+    
+    if breakdown_key not in st.session_state:
+        st.session_state[breakdown_key] = False
+    if comprehensive_key not in st.session_state:
+        st.session_state[comprehensive_key] = False
+
+    # Fetch DEX data inline (cached for performance)
+    # Check if global debug mode is enabled
+    debug_mode = st.session_state.get("global_dex_debug", False)
+    dex_data = get_dex_pair_info(pool, debug=debug_mode)
+    
+
+    
+    # Create the card using Streamlit components
+    with st.container():
+        # Card container with custom styling
+        st.markdown(f"""
+        <div class="pool-card {card_class} fade-in" style="animation-delay: {index * 0.1}s;">
+        """, unsafe_allow_html=True)
+        
+        # Card header
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"**{project}**")
+            st.caption(f"{symbol} • {chain}")
+        with col2:
+            st.markdown(f'<div class="apy-badge {apy_class} large-apy">{apy:.1f}%</div>', unsafe_allow_html=True)
+        
+        # Badges row
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f'<span class="badge strategy">{strategy}</span>', unsafe_allow_html=True)
+        with col2:
+            st.markdown(f'<span class="badge risk-{risk.lower()}">{risk} Risk</span>', unsafe_allow_html=True)
+        
+        # Metrics
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**TVL**")
+            st.markdown(f"**{format_number(tvl)}**")
+        with col2:
+            st.markdown("**IL Risk**")
+            st.markdown(f"**{il_risk}**")
+        
+        # DEX Data Section (inline)
+        st.markdown("---")
+        st.markdown("**📊 DEX Market Data**")
+        
+        if dex_data:
+            # DEX data in compact format
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Price and chain info
+                price_usd = dex_data.get("priceUsd", "N/A")
+                chain_id = dex_data.get("chainId", "N/A")
+                pool_chain = pool.get("chain", "N/A").title()
+                
+                if price_usd != "N/A":
+                    st.metric("Price", f"{float(price_usd):.6f}")
+                else:
+                    st.metric("Price", "N/A")
+                
+                # Chain info (without match text)
+                st.caption(f"Chain: {chain_id}")
+            
+            with col2:
+                # Volume data
+                volume_24h = dex_data.get("volume", {}).get("h24", 0)
+                st.metric("Volume 24h", f"{format_number(volume_24h)}")
+                
+                # DEX info
+                dex_id = dex_data.get("dexId", "N/A")
+                st.caption(f"DEX: {dex_id}")
+            
+            with col3:
+                # Liquidity data
+                liquidity_usd = dex_data.get("liquidity", {}).get("usd", 0)
+                st.metric("Liquidity", f"{format_number(liquidity_usd)}")
+                
+                # Pair info
+                base_token = dex_data.get("baseToken", {}).get("symbol", "N/A")
+                quote_token = dex_data.get("quoteToken", {}).get("symbol", "N/A")
+                st.caption(f"Pair: {base_token}/{quote_token}")
+        else:
+            # Fallback when no DEX data available
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("No DEX data available")
+            with col2:
+                st.markdown(f'<a href="https://dexscreener.com/search?q={symbol}" target="_blank" class="action-btn">🔍 Search on DexScreener</a>', unsafe_allow_html=True)
+        
+        # Chart Section
+        st.markdown("---")
+        st.markdown("**📈 APY History**")
+        
+        # Fetch chart data
+        chart_data = fetch_pool_chart(pool_id)
+        
+        if chart_data and len(chart_data) > 0:
+            # Convert to DataFrame for plotting
+            df_chart = pd.DataFrame(chart_data)
+            # Handle both Unix timestamps and ISO format
+            try:
+                df_chart['timestamp'] = pd.to_datetime(df_chart['timestamp'], unit='s')
+            except:
+                # If unit='s' fails, try parsing as ISO format
+                df_chart['timestamp'] = pd.to_datetime(df_chart['timestamp'])
+            df_chart = df_chart.sort_values('timestamp')
+            
+            # Create the chart
+            fig = go.Figure()
+            
+            # Add APY line
+            fig.add_trace(go.Scatter(
+                x=df_chart['timestamp'],
+                y=df_chart['apy'],
+                mode='lines',
+                name='APY %',
+                line=dict(color='#00ff88', width=2),
+                hovertemplate='<b>Date:</b> %{x}<br><b>APY:</b> %{y:.2f}%<extra></extra>'
+            ))
+            
+            # Add TVL line on secondary y-axis
+            if 'tvlUsd' in df_chart.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_chart['timestamp'],
+                    y=df_chart['tvlUsd'],
+                    mode='lines',
+                    name='TVL USD',
+                    line=dict(color='#ff6b6b', width=2),
+                    yaxis='y2',
+                    hovertemplate='<b>Date:</b> %{x}<br><b>TVL:</b> $%{y:,.0f}<extra></extra>'
+                ))
+            
+            # Update layout
+            fig.update_layout(
+                title=f"{project} APY & TVL History",
+                xaxis_title="Date",
+                yaxis=dict(
+                    title="APY %",
+                    side="left",
+                    showgrid=True,
+                    gridcolor='rgba(128,128,128,0.2)'
+                ),
+                yaxis2=dict(
+                    title="TVL USD",
+                    side="right",
+                    overlaying="y",
+                    showgrid=False
+                ),
+                height=300,
+                margin=dict(l=50, r=50, t=50, b=50),
+                hovermode='x unified',
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            # Display the chart
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
+            # Show current APY prominently
+            current_apy = df_chart['apy'].iloc[-1]
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
+                color: white;
+                padding: 0.75rem 1rem;
+                border-radius: 8px;
+                text-align: center;
+                font-size: 1.1rem;
+                font-weight: 600;
+                margin: 1rem 0;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            ">
+                📈 Current APY: {current_apy:.2f}%
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show some stats
+            col1, col2 = st.columns(2)
+            with col1:
+                max_apy = df_chart['apy'].max()
+                st.metric("Max APY", f"{max_apy:.2f}%")
+            with col2:
+                if 'tvlUsd' in df_chart.columns:
+                    current_tvl = df_chart['tvlUsd'].iloc[-1]
+                    st.metric("Current TVL", f"${format_number(current_tvl)}")
+        else:
+            st.info("📊 No historical chart data available for this pool.")
+        
+        # Actions (simplified - removed DEX button since data is inline)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(f"📈 Quick Analysis", key=f"breakdown_btn_{pool_id}_{index}", help="Fast tactical analysis"):
+                st.session_state[breakdown_key] = not st.session_state[breakdown_key]
+                st.session_state[comprehensive_key] = False
+        with col2:
+            if st.button(f"🔍 Deep Analysis", key=f"comprehensive_btn_{pool_id}_{index}", help="Comprehensive research"):
+                st.session_state[comprehensive_key] = not st.session_state[comprehensive_key]
+                st.session_state[breakdown_key] = False
+        
+        # External links
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f'<a href="{defillama_url}" target="_blank" class="action-btn">🔗 View Pool</a>', unsafe_allow_html=True)
+        with col2:
+            if dex_data and dex_data.get("url"):
+                st.markdown(f'<a href="{dex_data["url"]}" target="_blank" class="action-btn">📊 DexScreener</a>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<a href="https://dexscreener.com/search?q={symbol}" target="_blank" class="action-btn">📊 DexScreener</a>', unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Display reports if requested
+    if st.session_state[breakdown_key]:
+        with st.spinner("🔄 Generating quick analysis..."):
+            try:
+                breakdown_report = generate_pool_analysis(
+                    pool_data=pool,
+                    token_info="",
+                    news_data=[],
+                    report_type="breakdown"
+                )
+                st.info(breakdown_report)
+            except Exception as e:
+                st.error(f"Error generating analysis: {e}")
+
+    if st.session_state[comprehensive_key]:
+        with st.spinner("🌐 Generating comprehensive analysis..."):
+            try:
+                comprehensive_report = generate_pool_analysis(
+                    pool_data=pool,
+                    token_info="",
+                    news_data=[],
+                    report_type="comprehensive"
+                )
+                st.success(comprehensive_report)
+            except Exception as e:
+                st.error(f"Error generating analysis: {e}")
+
+
+
+def create_token_info_card(token_data):
+    """Create modern token info card using Streamlit components"""
+    if not token_data:
+        return
+
+    token_info = token_data["token_data"]
+    market_data = token_info.get("market_data", {})
+
+    current_price = market_data.get("current_price", {}).get("usd", 0)
+    price_change_24h = market_data.get("price_change_percentage_24h", 0)
+    market_cap = market_data.get("market_cap", {}).get("usd", 0)
+    volume_24h = market_data.get("total_volume", {}).get("usd", 0)
+
+    # Token header
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.image(token_info.get('image', {}).get('small', ''), width=64)
+    with col2:
+        st.markdown(f"## {token_info.get('name', 'N/A')}")
+        st.markdown(f"**{token_info.get('symbol', 'N/A').upper()}**")
+
+    # Price and metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Current Price", f"{current_price:,.4f}", f"{price_change_24h:+.2f}%")
+    with col2:
+        st.metric("Market Cap", format_number(market_cap))
+    with col3:
+        st.metric("Volume (24h)", format_number(volume_24h))
+
+def create_summary_cards(pools):
+    """Create summary statistics cards using Streamlit components"""
+    if not pools:
+        return
+    
+    total_pools = len(pools)
+    avg_apy = sum(p.get("apy", 0) for p in pools) / total_pools if total_pools > 0 else 0
+    total_tvl = sum(p.get("tvlUsd", 0) for p in pools)
+    low_risk_count = len([p for p in pools if classify_risk(p) == "Low"])
+    chains = len(set(p.get("chain", "") for p in pools))
+    
+    # Create summary cards using Streamlit components for minimal design
+    cols = st.columns(5)
+    
+    with cols[0]:
+        st.metric("🏆 Total Pools", total_pools)
+    
+    with cols[1]:
+        st.metric("📊 Avg APY", f"{avg_apy:.1f}%")
+    
+    with cols[2]:
+        st.metric("💰 Total TVL", format_number(total_tvl))
+    
+    with cols[3]:
+        st.metric("🛡️ Low Risk", low_risk_count)
+    
+    with cols[4]:
+        st.metric("🌐 Chains", chains)
+
+def display_pools_grid(pools, section_name=""):
+    """Display pools in a modern grid layout using Streamlit components"""
+    if not pools:
+        st.info("No pools found. Try adjusting your search criteria or explore other tokens.")
+        return
+
+    # Display pools in a grid using columns
+    for i in range(0, len(pools), 2):
+        cols = st.columns(2)
+        for j in range(2):
+            if i + j < len(pools):
+                with cols[j]:
+                    create_pool_card(pools[i + j], i + j)
 
 @st.cache_data(ttl=900)
 def get_news_summary(token, pools=None):
@@ -319,16 +1387,15 @@ def get_news_summary(token, pools=None):
         return "EXA API key missing for news analysis.", []
 
     search_terms = [token]
-
     if pools:
         unique_chains = list(set([pool.get("chain", "") for pool in pools[:5] if pool.get("chain")]))
         unique_projects = list(set([pool.get("project", "") for pool in pools[:5] if pool.get("project")]))
-
+        
         for chain in unique_chains[:2]:
-            if chain.lower() not in ["ethereum", "arbitrum", "optimism", "polygon", "binance", "solana"]:
+            if chain.lower() not in ["ethereum", "arbitrum", "optimism", "polygon", "binance", "solana", "avax", "bnb", "base", "zksync era", "linea", "scroll", "blast"]:
                 search_terms.append(chain)
         for project in unique_projects[:2]:
-            if project.lower() not in ["uniswap", "aave", "curve", "compound"]:
+            if project.lower() not in ["uniswap", "aave", "curve", "compound", "lido"]:
                 search_terms.append(project)
 
     try:
@@ -347,37 +1414,24 @@ def get_news_summary(token, pools=None):
             }
         )
         response.raise_for_status()
-
         news_json = response.json()
         results = news_json.get("results", [])
 
         if not results:
             return f"No recent DeFi news found for {token}.", []
 
-        news_summary_display = f"**📰 Recent DeFi News for {token.upper()}**"
-
-        context_info = []
-        if unique_chains:
-            context_info.append(f"Active on: {', '.join(unique_chains[:3])}")
-        if unique_projects:
-            context_info.append(f"Key protocols: {', '.join(unique_projects[:3])}")
-
-        if context_info:
-            news_summary_display += f"\n*Context: {' | '.join(context_info)}*"
-
-        news_summary_display += "\n\n"
-
+        news_summary_display = f"**📰 Recent DeFi News for {token.upper()}**\n\n"
         raw_news_data = []
+        
         for i, item in enumerate(results[:3], 1):
             title = item.get("title", "No Title")
             url = item.get("url", "")
             text = item.get("text", "")
 
             if text:
-                text_lower = text.lower()
-                relevant_section = ""
-                token_lower = token.lower()
                 sentences = text.split('. ')
+                token_lower = token.lower()
+                relevant_section = ""
                 for sentence in sentences:
                     if token_lower in sentence.lower():
                         relevant_section = sentence.strip()
@@ -386,7 +1440,6 @@ def get_news_summary(token, pools=None):
                     relevant_section = text[:200]
                 elif not relevant_section:
                     relevant_section = text
-
                 snippet = relevant_section + "..." if len(relevant_section) < len(text) else relevant_section
             else:
                 snippet = "No preview available."
@@ -400,688 +1453,181 @@ def get_news_summary(token, pools=None):
         logging.error(f"Error fetching news: {e}")
         return "Unable to fetch recent news at this time.", []
 
-
-# UI Components (Keeping existing functions and adding Nansen display)
-def create_token_info_card(token_data):
-    """Create token info card with CoinGecko data"""
-    if not token_data:
-        return
-
-    token_info = token_data["token_data"]
-    market_data = token_info.get("market_data", {})
-
-    current_price = market_data.get("current_price", {}).get("usd", 0)
-    price_change_24h = market_data.get("price_change_percentage_24h", 0)
-    market_cap = market_data.get("market_cap", {}).get("usd", 0)
-    volume_24h = market_data.get("total_volume", {}).get("usd", 0)
-
-    with st.container():
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white; padding: 2rem; border-radius: 20px; margin: 1rem 0;">
-        """, unsafe_allow_html=True)
-
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            image_url = token_info.get('image', {}).get('small', '')
-            if image_url:
-                st.image(image_url, width=60)
-
-        with col2:
-            st.markdown(f"## {token_info.get('name', 'N/A')}")
-            st.markdown(f"**{token_info.get('symbol', 'N/A').upper()}**")
-
-        price_change_emoji = "⬆️" if price_change_24h >= 0 else "⬇️"
-        change_color = "#4ade80" if price_change_24h >= 0 else "#f87171"
-        change_symbol = "+" if price_change_24h >= 0 else ""
-
-        st.markdown(f"""
-        <div style="margin: 1rem 0;">
-            <div style="font-size: 2.5rem; font-weight: bold; margin: 0.5rem 0;">${current_price:,.4f}</div>
-            <div style="font-size: 1.2rem; color: {change_color};">{price_change_emoji} {change_symbol}{price_change_24h:.2f}% (24h)</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Market Cap**")
-            st.markdown(f"${market_cap:,.0f}")
-        with col2:
-            st.markdown("**Volume (24h)**")
-            st.markdown(f"${volume_24h:,.0f}")
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-def create_pool_card_with_dual_reports(pool, strategy, risk, token_data_for_ai, raw_news_data_for_ai):
-    """Enhanced pool card with both report types"""
-    apy = pool.get("apy", 0)
-    apy_base = pool.get("apyBase", None)
-    apy_reward = pool.get("apyReward", None)
-    tvl = pool.get("tvlUsd", 0)
-    symbol = pool.get("symbol", "N/A").upper()
-    project = pool.get("project", "N/A").title()
-    chain = pool.get("chain", "N/A").upper()
-    pool_id = pool.get("pool", "")
-    il_risk = pool.get("ilRisk", "N/A")
-    url = f"https://defillama.com/yields/pool/{pool_id}"
-
-    # Session state keys for both report types
-    breakdown_key = f"breakdown_report_{pool_id}"
-    comprehensive_key = f"comprehensive_report_{pool_id}"
-    
-    if breakdown_key not in st.session_state:
-        st.session_state[breakdown_key] = False
-    if comprehensive_key not in st.session_state:
-        st.session_state[comprehensive_key] = False
-
-    with st.container():
-        border_colors = {"Low": "#10b981", "Medium": "#f59e0b", "High": "#ef4444"}
-        border_color = border_colors.get(risk, "#6b7280")
-
-        st.markdown(f"""
-        <div style="border-left: 5px solid {border_color}; background: white; border-radius: 15px;
-                    padding: 1.5rem; margin: 1rem 0; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
-        """, unsafe_allow_html=True)
-
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown(f"### {project}")
-            st.markdown(f"**{symbol}** • {chain}")
-
-            strategy_colors = {
-                "Simple Staking": "#dbeafe",
-                "Lending": "#dcfce7",
-                "LP Farming (DEX)": "#fef3c7",
-                "Vault": "#e7e5e4",
-                "Staking on LP": "#ccb8ee",
-                "High-Risk Farm": "#fecaca",
-                "Other": "#e2e8f0"
-            }
-            badge_color = strategy_colors.get(strategy, "#f3f4f6")
-            st.markdown(f"""
-            <span style="background: {badge_color}; padding: 0.3rem 0.8rem; border-radius: 15px;
-                         font-size: 0.8rem; font-weight: 600;">{strategy}</span>
-            """, unsafe_allow_html=True)
-
-        with col2:
-            apy_color = "#10b981" if apy < 10 else "#f59e0b" if apy < 20 else "#ef4444"
-            st.markdown(f"""
-            <div style="text-align: right;">
-                <div style="font-size: 2rem; font-weight: bold; color: {apy_color};">{apy:.2f}%</div>
-                <div style="color: #6b7280;">APY</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("TVL", f"${tvl/1000000:.1f}M")
-        with col2:
-            st.metric("Chain", chain)
-        with col3:
-            st.metric("Risk", risk)
-
-        st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Base APY:** {apy_base if apy_base is not None else 'N/A'}%")
-            st.write(f"**IL Risk:** {il_risk}")
-        with col2:
-            st.write(f"**Reward APY:** {apy_reward if apy_reward is not None else 'N/A'}%")
-            st.write(f"**Pool ID:** {pool_id[:15]}...")
-
-        st.markdown(f"[🔗 View on DefiLlama]({url})")
-
-        # Report selection buttons
-        st.markdown("### 📊 Analysis Reports")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📈 Pool Breakdown Analysis", key=f"breakdown_btn_{pool_id}", help="Quick tactical analysis with metrics focus"):
-                st.session_state[breakdown_key] = not st.session_state[breakdown_key]
-                st.session_state[comprehensive_key] = False  # Close other report
-        
-        with col2:
-            if st.button("🔍 Comprehensive Investment Report", key=f"comprehensive_btn_{pool_id}", help="Deep research with web crawling"):
-                st.session_state[comprehensive_key] = not st.session_state[comprehensive_key]
-                st.session_state[breakdown_key] = False  # Close other report
-
-        # Display breakdown report
-        if st.session_state[breakdown_key]:
-            with st.spinner("🔄 Generating Pool Breakdown Analysis..."):
-                # Prepare token info string for the breakdown report
-                token_info_str = ""
-                if token_data_for_ai and token_data_for_ai.get("token_data"):
-                    td = token_data_for_ai["token_data"]
-                    md = td.get("market_data", {})
-                    token_info_str = f"""
-                    Token: {td.get('name', 'N/A')} ({td.get('symbol', 'N/A').upper()})
-                    Price: ${md.get('current_price', {}).get('usd', 0):,.4f}
-                    24h Change: {md.get('price_change_percentage_24h', 0):.2f}%
-                    Market Cap: ${md.get('market_cap', {}).get('usd', 0):,.0f}
-                    """
-                
-                breakdown_report = generate_pool_analysis(
-                    pool_data=pool,
-                    token_info=token_info_str,
-                    news_data=raw_news_data_for_ai,
-                    report_type="breakdown"
-                )
-            
-            st.markdown(f'<div class="breakdown-report">{breakdown_report}</div>', unsafe_allow_html=True)
-
-        # Display comprehensive report
-        if st.session_state[comprehensive_key]:
-            with st.spinner("🌐 Generating Comprehensive Investment Report (includes web crawling)..."):
-                comprehensive_report = generate_pool_analysis(
-                    pool_data=pool,
-                    token_info="",  # Comprehensive report gets info from web crawling
-                    news_data=raw_news_data_for_ai,
-                    report_type="comprehensive"
-                )
-            
-            st.markdown(f'<div class="comprehensive-report">{comprehensive_report}</div>', unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-def create_price_chart(price_history):
-    """Create price chart using Plotly"""
-    if not price_history:
-        return None
-
-    prices = price_history.get("prices", [])
-    if not prices:
-        return None
-
-    df = pd.DataFrame(prices, columns=["timestamp", "price"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=df["price"],
-        mode="lines",
-        name="Price",
-        line=dict(color="#3b82f6", width=3),
-        fill="tonexty",
-        fillcolor="rgba(59, 130, 246, 0.1)"
-    ))
-
-    fig.update_layout(
-        title="7-Day Price History",
-        xaxis_title="Date",
-        yaxis_title="Price (USD)",
-        height=300,
-        margin=dict(l=0, r=0, t=40, b=0),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        showlegend=False
-    )
-
-    return fig
-
-# Enhanced Portfolio Functions
-@st.cache_data(ttl=3600, show_spinner=True)
-def generate_llm_portfolio_recommendation(token_symbol, total_value, eligible_pools, risk_preference):
-    """Generate portfolio recommendation using LLM"""
-    if not OPENAI_API_KEY:
-        return None, "OpenAI API key is not configured for LLM portfolio."
-
-    openai.api_key = OPENAI_API_KEY
-
-    pools_for_llm = []
-    for p in eligible_pools[:25]:
-        pools_for_llm.append({
-            "pool_id": p.get("pool"),
-            "project": p.get("project"),
-            "symbol": p.get("symbol"),
-            "chain": p.get("chain"),
-            "apy": p.get("apy"),
-            "tvlUsd": p.get("tvlUsd"),
-            "risk": classify_risk(p),
-            "strategy": classify_pool_type(p)
-        })
-
-    pools_str = "\n".join([
-        f"- ID: {p['pool_id']} | Project: {p['project']} | Symbol: {p['symbol']} | Chain: {p['chain']} | APY: {p['apy']:.2f}% | TVL: ${p['tvlUsd'] / 1e6:.1f}M | Risk: {p['risk']} | Strategy: {p['strategy']}"
-        for p in pools_for_llm
-    ])
-
-    prompt = f"""
-You are an expert DeFi portfolio manager. Construct a profitable, chain-diverse, and risk-appropriate yield farming portfolio.
-
-**User Investment Details:**
-- Total amount: ${total_value:,.0f} in {token_symbol.upper()}
-- Risk Preference: {risk_preference}
-
-**Available Pools:**
-{pools_str}
-
-**Instructions:**
-1. Determine optimal diversification strategy based on risk preference
-2. Select pools from the provided list (use exact Pool IDs)
-3. Prefer exposure to at least 3 different blockchains
-4. Provide percentage allocations that sum to 100%
-
-**Portfolio Explanation:**
-[Explain your strategic approach and rationale]
-
-**Portfolio Allocation:**
-| Pool ID | Project | Symbol | Chain | APY (%) | Risk Level | Allocation (%) |
-|---|---|---|---|---|---|---|
-"""
-
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a professional DeFi portfolio manager."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            max_tokens=1500,
-        )
-        llm_output = response.choices[0].message.content
-
-        if "Portfolio Allocation:" not in llm_output:
-            return None, "LLM response malformed."
-
-        explanation_part, allocation_table_part = llm_output.split("Portfolio Allocation:", 1)
-        explanation = explanation_part.strip()
-
-        table_lines = allocation_table_part.strip().split('\n')
-        data_rows = [line for line in table_lines if line.strip().startswith('|') and '---' not in line and 'Pool ID' not in line]
-
-        portfolio_allocations = []
-        pool_id_map = {p.get("pool", ""): p for p in eligible_pools}
-
-        for row in data_rows:
-            if "TOTAL" in row.upper():
-                continue
-            cols = [col.strip() for col in row.strip('|').split('|')]
-            if len(cols) == 7:
-                try:
-                    pool_id = cols[0]
-                    allocation_percent_str = cols[6].replace('%', '').strip()
-                    allocation_percent = float(allocation_percent_str)
-
-                    original_pool_data = pool_id_map.get(pool_id)
-
-                    if original_pool_data:
-                        portfolio_allocations.append({
-                            "pool": original_pool_data,
-                            "allocation_percent": allocation_percent,
-                            "risk": classify_risk(original_pool_data),
-                            "apy": original_pool_data.get("apy", 0)
-                        })
-                    else:
-                        logging.warning(f"Could not map pool ID '{pool_id}' from LLM output.")
-                except (ValueError, IndexError) as e:
-                    logging.error(f"Error parsing table row: {row} - {e}")
-                    continue
-
-        # Normalize allocations
-        current_total_allocation = sum([item["allocation_percent"] for item in portfolio_allocations])
-        if current_total_allocation > 0 and abs(current_total_allocation - 100) > 0.1:
-            for item in portfolio_allocations:
-                item["allocation_percent"] = (item["allocation_percent"] / current_total_allocation) * 100
-
-        return portfolio_allocations, explanation
-
-    except openai.AuthenticationError:
-        return None, "OpenAI API key is invalid or not set."
-    except Exception as e:
-        logging.error(f"Failed to generate LLM portfolio: {e}")
-        return None, f"An unexpected error occurred: {e}"
-
-# Main Application
 def main():
+    """Main application function"""
     st.set_page_config(
-        page_title="DeFi Yield Explorer - Enhanced Reports",
+        page_title="DeFi Yield Explorer - Modern UI",
         page_icon="🚀",
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="collapsed"
     )
 
     load_custom_css()
 
+    # Hero Section
     st.markdown("""
-    <div style="text-align: center; padding: 2rem 0;">
-        <h1 style="font-size: 3rem; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-            🚀 DeFi Yield Explorer
-        </h1>
-        <p style="font-size: 1.2rem; color: #6b7280; margin: 0.5rem 0;">
-            Discover, analyze, and optimize your DeFi yield farming strategies with dual AI report types
-        </p>
+    <div class="hero-section">
+        <div class="hero-title">🚀 DeFi Yield Explorer</div>
+        <div class="hero-subtitle">Discover high-yield opportunities with AI-powered analysis</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Enhanced intro section explaining report types
-    with st.expander("📋 Report Types Explained", expanded=False):
-        col1, col2 = st.columns(2)
+    # Settings
+    with st.expander("⚙️ Settings", expanded=False):
+        if "show_source_labels" not in st.session_state:
+            st.session_state["show_source_labels"] = True
+        if "show_debug_logs" not in st.session_state:
+            st.session_state["show_debug_logs"] = False
+        if "global_dex_debug" not in st.session_state:
+            st.session_state["global_dex_debug"] = False
         
-        with col1:
-            st.markdown("""
-            ### 📈 Pool Breakdown Analysis
-            **Fast & Tactical** - Perfect for active traders
-            
-            **Features:**
-            - ⚡ Quick generation (no web crawling)
-            - 📊 Deep metrics analysis (APY breakdown, IL calculations)
-            - 🎯 Position sizing recommendations
-            - 📉 Technical indicators & efficiency ratios
-            - 🔄 Rebalancing strategies
-            - 💰 Capital allocation guidance
-            
-            **Best for:** Day-to-day portfolio management, tactical decisions
-            """)
-        
-        with col2:
-            st.markdown("""
-            ### 🔍 Comprehensive Investment Report
-            **Deep & Thorough** - Perfect for major investments
-            
-            **Features:**
-            - 🌐 Web crawling of official docs & audits
-            - 📋 Multi-source information synthesis
-            - 🛡️ Detailed security analysis
-            - 📖 Protocol deep-dive research
-            - ⚖️ Risk assessment from multiple angles
-            - 🎯 Investment thesis validation
-            
-            **Best for:** Major investment decisions, due diligence
-            """)
+        st.session_state["show_source_labels"] = st.checkbox("Show source badges", value=st.session_state["show_source_labels"])
+        st.session_state["show_debug_logs"] = st.checkbox("Show debug info", value=st.session_state["show_debug_logs"])
+        st.session_state["global_dex_debug"] = st.checkbox("Debug DEX chain mapping", value=st.session_state["global_dex_debug"], help="Enable detailed logging for DEX chain mapping issues")
 
-    col1, col2 = st.columns([2, 1])
+    # Search Section
+    st.markdown("""
+    <div class="search-container">
+        <h3 style="margin: 0 0 1rem 0; color: var(--text-primary);">🔍 Find Yield Opportunities</h3>
+        <p style="margin: 0 0 1.5rem 0; color: var(--text-secondary);">Enter a token symbol to discover the best DeFi yield farming opportunities</p>
+    """, unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([3, 1])
     with col1:
-        token = st.text_input("🔍 Enter token symbol (e.g., ETH, USDC, MATIC):", placeholder="ETH").strip()
+        token = st.text_input("", placeholder="Enter token symbol (e.g., ETH, USDC, WBTC)", label_visibility="collapsed")
     with col2:
-        token_amount = st.number_input("💰 Token amount you have:", min_value=0.0, value=1.0, step=0.1)
+        search_clicked = st.button("🔍 Search Pools", type="primary", use_container_width=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if not token:
-        st.info("👆 Enter a token symbol above to start exploring yield opportunities")
-        return
+    # Initialize variables
+    token_data = None
+    pools = []
+    news_summary_display = ""
+    raw_news_data = []
 
-    with st.spinner("🔄 Fetching token data and yield opportunities..."):
-        token_data = fetch_coingecko_token_data(token)
-        pools = fetch_yield_opportunities(token)
+    # Fetch data when token is provided
+    if token:
+        with st.spinner(f"🔄 Finding opportunities for {token.upper()}..."):
+            token_data = fetch_coingecko_token_data(token)
+            pools = fetch_yield_opportunities(token)
+            news_summary_display, raw_news_data = get_news_summary(token, pools)
 
-    if not pools:
-        st.warning(f"❌ No suitable yield pools found for token '{token.upper()}'")
-        # Still show token info and news/Nansen if pools are empty but token data exists
+        # Sort pools by score
+        pools.sort(key=score_pool, reverse=True)
+
+        # Display token info if available
         if token_data:
             create_token_info_card(token_data)
-            price_chart = create_price_chart(token_data.get("price_history"))
-            if price_chart:
-                st.plotly_chart(price_chart, use_container_width=True)
-            news_summary_display, raw_news_for_ai = get_news_summary(token, pools) # Pass empty pools if none
+            show_source_badge("CoinGecko", "https://www.coingecko.com/en/api")
 
-            # Directly show Tab 3 content if no pools found for quick lookup
-            st.markdown("---")
-            st.markdown("### 📰 Market Intelligence (No Yield Pools Found)")
-            st.markdown(news_summary_display)
-
-            market_data = token_data["token_data"].get("market_data", {})
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### 📊 Market Metrics (from CoinGecko)")
-                st.write(f"**All-time High:** ${market_data.get('ath', {}).get('usd', 0):,.4f}")
-                st.write(f"**All-time Low:** ${market_data.get('atl', {}).get('usd', 0):,.4f}")
-                st.write(f"**Market Cap Rank:** #{market_data.get('market_cap_rank', 'N/A')}")
-            with col2:
-                st.markdown("#### ⏱️ Performance (from CoinGecko)")
-                st.write(f"**7d Change:** {market_data.get('price_change_percentage_7d', 0):.2f}%")
-                st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
-                st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
-            
-
-    if token_data:
-        create_token_info_card(token_data)
-
-        price_chart = create_price_chart(token_data.get("price_history"))
-        if price_chart:
-            st.plotly_chart(price_chart, use_container_width=True)
-
-        token_price = token_data["token_data"].get("market_data", {}).get("current_price", {}).get("usd", 0)
-    else:
-        st.warning("⚠️ Could not fetch token data from CoinGecko")
-        token_price = 0
-
-    pools.sort(key=score_pool, reverse=True)
-    news_summary_display, raw_news_for_ai = get_news_summary(token, pools)
-
-    tab1, tab2, tab3 = st.tabs(["🎯 Pool Explorer", "📊 Portfolio Constructor", "📰 Market Intel"])
+    # Main Content Tabs
+    tab1, tab2, tab3 = st.tabs(["🎯 Pool Explorer", "📰 Market Intel", "🌱 Trending"])
 
     with tab1:
-        risk_groups = {"Low": [], "Medium": [], "High": []}
-        for pool in pools:
-            risk = classify_risk(pool)
-            if risk in risk_groups:
-                risk_groups[risk].append(pool)
+        if not token:
+            st.info("🎯 Ready to Find High Yields? Enter a token symbol above to discover the best DeFi opportunities")
+        elif not pools:
+            st.warning(f"❌ No suitable yield pools found for {token.upper()}. Try a different token.")
+        else:
+            # Summary Cards
+            create_summary_cards(pools)
+            
+            # Categorize pools by risk
+            risk_groups = {"Low": [], "High": []}
+            for pool in pools:
+                risk = classify_risk(pool)
+                if risk == "Low":
+                    risk_groups["Low"].append(pool)
+            
+            # Apply special filtering for high-risk pools (top 100 coins only)
+            high_risk_filtered = filter_high_risk_pools(pools)
+            risk_groups["High"] = high_risk_filtered
+            
+            # Debug filtering process if enabled
+            debug_high_risk_filtering(pools)
+            test_top_50_filtering()
 
-        for risk in risk_groups:
-            key = f"show_more_{risk.lower()}"
-            if key not in st.session_state:
-                st.session_state[key] = False
+            # Display pools by risk category
+            for risk_level in ["Low", "High"]:
+                risk_pools = risk_groups[risk_level]
+                if not risk_pools:
+                    continue
 
-        st.markdown(f"### 🏆 Top Yield Opportunities for {token.upper()}")
+                emoji = "🟢" if risk_level == "Low" else "🔴"
+                
+                if risk_level == "High":
+                    st.markdown(f"## {emoji} {risk_level} Risk Pools - Both Tokens Top 50 ({len(risk_pools)} pools)")
+                    st.info(f"🔍 High-risk pools are filtered to only include pools where BOTH tokens are in the top 50 by market cap, sorted by highest APY. Top coins: {get_top_50_coins_display()}")
+                else:
+                    st.markdown(f"## {emoji} {risk_level} Risk Pools ({len(risk_pools)} pools)")
 
-        # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            avg_apy = sum([p["apy"] for p in pools]) / len(pools) if pools else 0
-            st.metric("Average APY", f"{avg_apy:.2f}%")
-        with col2:
-            total_tvl = sum([p["tvlUsd"] for p in pools])
-            st.metric("Total TVL", f"${total_tvl/1000000:.1f}M")
-        with col3:
-            st.metric("Available Pools", len(pools))
-        with col4:
-            st.metric("Low Risk Pools", len(risk_groups["Low"]))
+                # Show/hide toggle
+                show_key = f"show_all_{risk_level.lower()}"
+                if show_key not in st.session_state:
+                    st.session_state[show_key] = False
 
-        # Report type selector at the top
-        st.markdown("### 📊 Choose Your Analysis Style")
-        
-        analysis_style = st.radio(
-            "Select default report type for pools:",
-            ["📈 Pool Breakdown (Fast)", "🔍 Comprehensive (Deep)"],
-            horizontal=True,
-            help="You can always switch between both types for each individual pool"
-        )
-
-        risk_emojis = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}
-
-        for risk in ["Low", "Medium", "High"]:
-            risk_pools = risk_groups[risk]
-            if not risk_pools:
-                continue
-
-            st.markdown(f"## {risk_emojis[risk]} {risk} Risk Pools ({len(risk_pools)} available)")
-
-            key = f"show_more_{risk.lower()}"
-            display_pools = risk_pools if st.session_state[key] else risk_pools[:3]
-
-            for pool in display_pools:
-                strategy = classify_pool_type(pool)
-                risk_level = classify_risk(pool)
-                create_pool_card_with_dual_reports(pool, strategy, risk_level, token_data, raw_news_for_ai)
-                st.markdown("---")
-
-            if len(risk_pools) > 3:
-                toggle_label = "Show Less" if st.session_state[key] else f"Show {len(risk_pools) - 3} More"
-                if st.button(f"{toggle_label} {risk} Risk Pools", key=f"toggle_{risk.lower()}"):
-                    st.session_state[key] = not st.session_state[key]
-                    st.rerun()
+                display_count = len(risk_pools) if st.session_state[show_key] else min(6, len(risk_pools))
+                display_pools = risk_pools[:display_count]
+                
+                display_pools_grid(display_pools, f"{risk_level}_risk")
+                
+                # Load more button
+                if len(risk_pools) > 6:
+                    remaining = len(risk_pools) - display_count
+                    if remaining > 0:
+                        if st.button(f"📥 Show {remaining} More {risk_level} Risk Pools", key=f"load_more_{risk_level}"):
+                            st.session_state[show_key] = True
+                            st.rerun()
+                    elif st.session_state[show_key]:
+                        if st.button(f"📤 Show Less", key=f"show_less_{risk_level}"):
+                            st.session_state[show_key] = False
+                            st.rerun()
 
     with tab2:
-        st.markdown("### 📊 AI-Powered Portfolio Constructor")
+        st.markdown("## 📰 Market Intelligence")
         
-        if token_price > 0:
-            col1, col2 = st.columns(2)
-            with col1:
-                investment_amount = st.number_input(
-                    f"💰 Investment Amount (USD)", 
-                    min_value=100.0, 
-                    value=float(token_amount * token_price) if token_price > 0 else 1000.0,
-                    step=100.0
-                )
-            
-            with col2:
-                risk_preference = st.selectbox(
-                    "🎯 Risk Preference",
-                    ["Conservative", "Balanced", "Aggressive"],
-                    index=1
-                )
-
-            if st.button("🤖 Generate AI Portfolio", type="primary"):
-                with st.spinner("🔄 AI is analyzing pools and generating optimal portfolio..."):
-                    portfolio_allocations, explanation = generate_llm_portfolio_recommendation(
-                        token, investment_amount, pools[:25], risk_preference
-                    )
-                
-                if portfolio_allocations:
-                    st.markdown("### 🎯 Your Optimized Portfolio")
-                    st.markdown(f"**Strategy Explanation:**\n{explanation}")
-                    
-                    # Portfolio summary
-                    total_expected_apy = sum([item["apy"] * (item["allocation_percent"]/100) for item in portfolio_allocations])
-                    chain_diversity = len(set([item["pool"]["chain"] for item in portfolio_allocations]))
-                    risk_distribution = {}
-                    for item in portfolio_allocations:
-                        risk_level = item["risk"]
-                        risk_distribution[risk_level] = risk_distribution.get(risk_level, 0) + item["allocation_percent"]
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Expected APY", f"{total_expected_apy:.2f}%")
-                    with col2:
-                        st.metric("Chain Diversity", f"{chain_diversity} chains")
-                    with col3:
-                        st.metric("Total Investment", f"${investment_amount:,.0f}")
-                    with col4:
-                        low_risk_pct = risk_distribution.get("Low", 0)
-                        st.metric("Low Risk %", f"{low_risk_pct:.1f}%")
-                    
-                    # Detailed portfolio breakdown
-                    st.markdown("### 📋 Portfolio Breakdown")
-                    
-                    portfolio_data = []
-                    for item in portfolio_allocations:
-                        pool = item["pool"]
-                        allocation_amount = investment_amount * (item["allocation_percent"] / 100)
-                        
-                        portfolio_data.append({
-                            "Project": pool["project"],
-                            "Symbol": pool["symbol"],
-                            "Chain": pool["chain"],
-                            "APY": f"{pool['apy']:.2f}%",
-                            "Risk": item["risk"],
-                            "Allocation": f"{item['allocation_percent']:.1f}%",
-                            "Amount": f"${allocation_amount:,.0f}",
-                            "Expected Annual": f"${allocation_amount * pool['apy'] / 100:,.0f}"
-                        })
-                    
-                    df = pd.DataFrame(portfolio_data)
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # Download option
-                    if st.button("📥 Export Portfolio Data"):
-                        csv = df.to_csv(index=False)
-                        st.download_button(
-                            label="💾 Download CSV",
-                            data=csv,
-                            file_name=f"{token.upper()}_portfolio_{datetime.now().strftime('%Y%m%d')}.csv",
-                            mime="text/csv"
-                        )
-                    
-                    # Individual pool reports for portfolio
-                    st.markdown("### 📊 Detailed Analysis for Portfolio Pools")
-                    
-                    for item in portfolio_allocations:
-                        pool = item["pool"]
-                        strategy = classify_pool_type(pool)
-                        risk_level = item["risk"]
-                        
-                        with st.expander(f"📈 {pool['project']} - {pool['symbol']} ({item['allocation_percent']:.1f}% allocation)"):
-                            # Quick breakdown report for each portfolio pool
-                            token_info_str = ""
-                            if token_data and token_data.get("token_data"):
-                                td = token_data["token_data"]
-                                md = td.get("market_data", {})
-                                token_info_str = f"""
-                                Token: {td.get('name', 'N/A')} ({td.get('symbol', 'N/A').upper()})
-                                Price: ${md.get('current_price', {}).get('usd', 0):,.4f}
-                                24h Change: {md.get('price_change_percentage_24h', 0):.2f}%
-                                """
-                            
-                            with st.spinner("Generating portfolio pool analysis..."):
-                                breakdown_report = generate_pool_analysis(
-                                    pool_data=pool,
-                                    token_info=token_info_str,
-                                    news_data=raw_news_for_ai,
-                                    report_type="breakdown"
-                                )
-                            
-                            st.markdown(breakdown_report)
-                
-                else:
-                    st.error("❌ Failed to generate portfolio. Please try again.")
+        if not token:
+            st.info("📰 Market News & Analysis - Enter a token to see latest market intelligence")
         else:
-            st.warning("⚠️ Token price data needed for portfolio construction")
+            if news_summary_display:
+                st.markdown(news_summary_display)
+                show_source_badge("EXA.ai", "https://exa.ai/")
+            
+            # Market context if pools exist
+            if pools:
+                st.markdown("### 🌐 Market Context")
+                chain_distribution = {}
+                for pool in pools[:20]:
+                    chain = pool.get("chain", "Unknown")
+                    if chain not in chain_distribution:
+                        chain_distribution[chain] = {"count": 0, "total_tvl": 0, "avg_apy": []}
+                    chain_distribution[chain]["count"] += 1
+                    chain_distribution[chain]["total_tvl"] += pool.get("tvlUsd", 0)
+                    chain_distribution[chain]["avg_apy"].append(pool.get("apy", 0))
+                
+                for chain in chain_distribution:
+                    apys = chain_distribution[chain]["avg_apy"]
+                    chain_distribution[chain]["avg_apy"] = sum(apys) / len(apys) if apys else 0
+                
+                chain_data = []
+                for chain, data in chain_distribution.items():
+                    chain_data.append({
+                        "Chain": chain,
+                        "Pools": data["count"],
+                        "Total TVL": f"{data['total_tvl']/1000000:.1f}M",
+                        "Avg APY": f"{data['avg_apy']:.1f}%"
+                    })
+                
+                df_chains = pd.DataFrame(chain_data)
+                st.dataframe(df_chains, use_container_width=True, hide_index=True)
 
     with tab3:
-        st.markdown("### 📰 Market Intelligence")
-        st.markdown(news_summary_display)
-
-        if token_data:
-            market_data = token_data["token_data"].get("market_data", {})
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### 📊 Market Metrics (from CoinGecko)")
-                st.write(f"**All-time High:** ${market_data.get('ath', {}).get('usd', 0):,.4f}")
-                st.write(f"**All-time Low:** ${market_data.get('atl', {}).get('usd', 0):,.4f}")
-                st.write(f"**Market Cap Rank:** #{market_data.get('market_cap_rank', 'N/A')}")
-
-            with col2:
-                st.markdown("#### ⏱️ Performance (from CoinGecko)")
-                st.write(f"**7d Change:** {market_data.get('price_change_percentage_7d', 0):.2f}%")
-                st.write(f"**30d Change:** {market_data.get('price_change_percentage_30d', 0):.2f}%")
-                st.write(f"**1y Change:** {market_data.get('price_change_percentage_1y', 0):.2f}%")
-
-    
-
-        # Additional market insights (existing content)
-        st.markdown("### 🌐 DeFi Market Context (from DefiLlama Pools)")
+        st.markdown("## 🌱 Trending Opportunities")
         
-        if pools:
-            # Chain distribution analysis
-            chain_distribution = {}
-            for pool in pools[:20]:  # Top 20 pools
-                chain = pool.get("chain", "Unknown")
-                if chain not in chain_distribution:
-                    chain_distribution[chain] = {"count": 0, "total_tvl": 0, "avg_apy": []}
-                chain_distribution[chain]["count"] += 1
-                chain_distribution[chain]["total_tvl"] += pool.get("tvlUsd", 0)
-                chain_distribution[chain]["avg_apy"].append(pool.get("apy", 0))
-            
-            # Calculate averages
-            for chain in chain_distribution:
-                apys = chain_distribution[chain]["avg_apy"]
-                chain_distribution[chain]["avg_apy"] = sum(apys) / len(apys) if apys else 0
-            
-            st.markdown("#### 🌐 Chain Distribution (Top Opportunities)")
-            
-            chain_data = []
-            for chain, data in chain_distribution.items():
-                chain_data.append({
-                    "Chain": chain,
-                    "Pool Count": data["count"],
-                    "Total TVL": f"${data['total_tvl']/1000000:.1f}M",
-                    "Avg APY": f"{data['avg_apy']:.2f}%"
-                })
-            
-            df_chains = pd.DataFrame(chain_data)
-            st.dataframe(df_chains, use_container_width=True)
+        st.info("🚀 Coming Soon - Trending pools and ecosystem insights will be available here")
 
 if __name__ == "__main__":
     setup_playwright()
+
     main()
