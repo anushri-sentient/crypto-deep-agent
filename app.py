@@ -309,8 +309,8 @@ def filter_high_risk_pools(pools):
 ALLOWED_PROJECTS = [
     "pendle", "compound-v3", "compound-v2", "beefy", "aave-v3", "aave-v2",
     "uniswap-v3", "uniswap-v2", "euler-v2", "curve-dex", "aerodrome-slipstream",
-    "aerodrome-v1", "morpho", "kamino", "raydium", "drift", "orca", 
-    "ratex", "exponent", "loopscale", "meteora", "jupiter"
+    "aerodrome-v1", "morpho", "kamino-lend", "kamino-liquidity", "raydium-amm", "drift-staked-sol", "orca-dex", 
+ "jupiter-staked-sol"
 ]
 
 SIMPLE_STAKING_PROJECTS = [
@@ -827,6 +827,131 @@ def classify_pool_type(pool):
         return "Leveraged"
     
     return "Other"
+
+def classify_pool_recommendation_category(pool):
+    """
+    Enhanced pool classification into recommendation categories
+    based on risk and asset correlation for investment decisions.
+    """
+    name = pool.get("pool", "").lower()
+    project = pool.get("project", "").lower()
+    symbol = pool.get("symbol", "").lower()
+    
+    # 1. Staking and Money Market (Low Risk)
+    if project in SIMPLE_STAKING_PROJECTS:
+        return {
+            "category": "Staking and Money Market",
+            "risk": "Low",
+            "description": "Direct staking of native tokens on secure, well-audited protocols",
+            "examples": "Lido (stETH), Rocket Pool, Binance Staked ETH"
+        }
+    
+    if "aave" in project or "compound" in project or project in ["venus"]:
+        return {
+            "category": "Staking and Money Market", 
+            "risk": "Low",
+            "description": "Lending on established money market protocols with stable returns",
+            "examples": "Aave, Compound, Venus"
+        }
+    
+    # 2. LP on Correlated Assets Lending (Low Risk)
+    if is_correlated_lending_pool(pool):
+        return {
+            "category": "LP on Correlated Assets Lending",
+            "risk": "Low", 
+            "description": "Liquidity provision with highly correlated assets to minimize impermanent loss",
+            "examples": "ETH/WETH, USDC/USDT, DAI/USDC, stETH/wstETH"
+        }
+    
+    # 3. LP on Uncorrelated Assets Lending - Medium Risk (Top 50 tokens)
+    if is_uncorrelated_lending_pool(pool) and are_both_tokens_top_50(pool):
+        return {
+            "category": "LP on Uncorrelated Assets Lending (Medium Risk)",
+            "risk": "Medium",
+            "description": "Liquidity provision with uncorrelated assets, but both tokens are top 50 by market cap",
+            "examples": "ETH/BTC, SOL/AVAX, LINK/UNI, established crypto pairs"
+        }
+    
+    # 4. LP on Uncorrelated Assets Lending - High Risk (Non-top 50 tokens)
+    if is_uncorrelated_lending_pool(pool):
+        return {
+            "category": "LP on Uncorrelated Assets Lending (High Risk)",
+            "risk": "High",
+            "description": "Liquidity provision with uncorrelated assets, higher impermanent loss risk",
+            "examples": "ETH/USDC, BTC/USDT, SOL/AVAX, cross-asset pairs"
+        }
+    
+    # 5. Vault/Beefy/Pendle AMM (High Risk)
+    if project in ["yearn", "beefy", "autofarm", "reaper", "pendle"]:
+        return {
+            "category": "Vault/Beefy/Pendle AMM",
+            "risk": "High",
+            "description": "Advanced yield optimization protocols with auto-compounding, leverage, or tokenized yields",
+            "examples": "Yearn Finance vaults, Beefy auto-compounding, Pendle yield markets, Reaper strategies"
+        }
+    
+    # 6. Other (High Risk)
+    return {
+        "category": "Other",
+        "risk": "High",
+        "description": "Other yield farming strategies and protocols",
+        "examples": "LP farming, leveraged strategies, other DeFi protocols"
+    }
+
+def is_correlated_lending_pool(pool):
+    """Check if pool involves correlated asset lending (low risk) based on ilRisk field"""
+    # Use ilRisk as the primary indicator for correlation
+    il_risk = pool.get("ilRisk", "yes").lower()
+    
+    # If ilRisk is "no", consider it correlated (low risk)
+    # If ilRisk is "yes", consider it uncorrelated (high risk)
+    return il_risk == "no"
+
+def is_uncorrelated_lending_pool(pool):
+    """Check if pool involves uncorrelated asset lending (high risk) based on ilRisk field"""
+    # Use ilRisk as the primary indicator for correlation
+    il_risk = pool.get("ilRisk", "yes").lower()
+    
+    # If ilRisk is "yes", consider it uncorrelated (high risk)
+    # If ilRisk is "no", consider it correlated (low risk)
+    return il_risk == "yes"
+
+def are_both_tokens_top_50(pool):
+    """Check if both tokens in the pool are in the top 50 by market cap"""
+    symbol = pool.get("symbol", "").lower()
+    
+    # Parse symbol to extract token pairs
+    import re
+    symbol_parts = re.split(r'[-/\s_]+', symbol)
+    
+    if len(symbol_parts) < 2:
+        return False
+    
+    token1 = symbol_parts[0].strip()
+    token2 = symbol_parts[1].strip()
+    
+    # Top 50 tokens by market cap (approximate list)
+    top_50_tokens = {
+        # Major cryptocurrencies
+        "btc", "bitcoin", "eth", "ethereum", "usdt", "tether", "usdc", "usd coin",
+        "bnb", "binance coin", "sol", "solana", "xrp", "ripple", "ada", "cardano",
+        "avax", "avalanche", "doge", "dogecoin", "trx", "tron", "dot", "polkadot",
+        "matic", "polygon", "link", "chainlink", "ton", "toncoin", "dai", "dai",
+        "shib", "shiba inu", "uni", "uniswap", "ltc", "litecoin", "bch", "bitcoin cash",
+        "xlm", "stellar", "etc", "ethereum classic", "fil", "filecoin", "apt", "aptos",
+        "hbar", "hedera", "near", "near protocol", "vet", "vechain", "atom", "cosmos",
+        "xmr", "monero", "algo", "algorand", "icp", "internet computer", "stx", "stacks",
+        "ldo", "lido dao", "apt", "aptos", "arb", "arbitrum", "op", "optimism",
+        "mkr", "maker", "imx", "immutable", "sui", "sui", "sei", "sei network",
+        "apt", "aptos", "grt", "the graph", "aave", "aave", "snx", "synthetix",
+        "comp", "compound", "crv", "curve dao token", "1inch", "1inch", "sushi", "sushiswap"
+    }
+    
+    # Check if both tokens are in top 50
+    token1_in_top50 = token1 in top_50_tokens
+    token2_in_top50 = token2 in top_50_tokens
+    
+    return token1_in_top50 and token2_in_top50
 
 def classify_risk(pool):
     """Classify risk level based on IL Risk."""
@@ -1380,6 +1505,150 @@ def display_pools_grid(pools, section_name=""):
                 with cols[j]:
                     create_pool_card(pools[i + j], i + j)
 
+def display_pools_by_recommendation_category(pools):
+    """Display pools grouped by the new recommendation categories as CSV tables"""
+    if not pools:
+        st.info("No pools found. Try adjusting your search criteria or explore other tokens.")
+        return
+
+    # Group pools by recommendation category
+    category_groups = {}
+    for pool in pools:
+        category_info = classify_pool_recommendation_category(pool)
+        category = category_info["category"]
+        
+        if category not in category_groups:
+            category_groups[category] = {
+                "info": category_info,
+                "pools": []
+            }
+        category_groups[category]["pools"].append(pool)
+
+    # Display each category
+    for category, group_data in category_groups.items():
+        category_info = group_data["info"]
+        category_pools = group_data["pools"]
+        
+        # Category header with risk indicator
+        risk_emoji = "🟢" if category_info["risk"] == "Low" else "🟡" if category_info["risk"] == "Medium" else "🔴"
+        st.markdown(f"## {risk_emoji} {category} ({len(category_pools)} pools)")
+        
+        # Category description
+        st.info(f"**{category_info['description']}** - Examples: {category_info['examples']}")
+        
+        # Show/hide toggle for this category
+        show_key = f"show_category_{category.replace(' ', '_').replace('/', '_')}"
+        if show_key not in st.session_state:
+            st.session_state[show_key] = False
+
+        display_count = len(category_pools) if st.session_state[show_key] else min(20, len(category_pools))
+        display_pools = category_pools[:display_count]
+        
+        # Convert pools to DataFrame for CSV display
+        pool_data = []
+        for pool in display_pools:
+            pool_data.append({
+                "Symbol": pool.get("symbol", "N/A"),
+                "Project": pool.get("project", "N/A").title(),
+                "Chain": pool.get("chain", "N/A").title(),
+                "APY (%)": f"{pool.get('apy', 0):.2f}",
+                "TVL ($)": f"{pool.get('tvlUsd', 0):,.0f}",
+                "IL Risk": pool.get("ilRisk", "N/A"),
+                "Pool Type": classify_pool_recommendation_category(pool)["category"],
+                "Pool ID": pool.get("pool", "N/A")[:20] + "..." if len(pool.get("pool", "")) > 20 else pool.get("pool", "N/A")
+            })
+        
+        # Create DataFrame and display
+        if pool_data:
+            df = pd.DataFrame(pool_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            # Add download button for CSV
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label=f"📥 Download {category} CSV",
+                data=csv,
+                file_name=f"{category.replace(' ', '_').replace('/', '_')}_pools.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No pools in this category.")
+        
+        # Load more button for this category
+        if len(category_pools) > 20:
+            remaining = len(category_pools) - display_count
+            if remaining > 0:
+                if st.button(f"📥 Show {remaining} More {category} Pools", key=f"load_more_{category.replace(' ', '_')}"):
+                    st.session_state[show_key] = True
+                    st.rerun()
+            elif st.session_state[show_key]:
+                if st.button(f"📤 Show Less {category}", key=f"show_less_{category.replace(' ', '_')}"):
+                    st.session_state[show_key] = False
+                    st.rerun()
+        
+        st.markdown("---")
+
+def display_pools_by_recommendation_category_cards(pools):
+    """Display pools grouped by the new recommendation categories as detailed cards"""
+    if not pools:
+        st.info("No pools found. Try adjusting your search criteria or explore other tokens.")
+        return
+
+    # Group pools by recommendation category
+    category_groups = {}
+    for pool in pools:
+        category_info = classify_pool_recommendation_category(pool)
+        category = category_info["category"]
+        
+        if category not in category_groups:
+            category_groups[category] = {
+                "info": category_info,
+                "pools": []
+            }
+        category_groups[category]["pools"].append(pool)
+
+    # Display each category
+    for category, group_data in category_groups.items():
+        category_info = group_data["info"]
+        category_pools = group_data["pools"]
+        
+        # Category header with risk indicator
+        risk_emoji = "🟢" if category_info["risk"] == "Low" else "🟡" if category_info["risk"] == "Medium" else "🔴"
+        st.markdown(f"## {risk_emoji} {category} ({len(category_pools)} pools)")
+        
+        # Category description
+        st.info(f"**{category_info['description']}** - Examples: {category_info['examples']}")
+        
+        # Show/hide toggle for this category
+        show_key = f"show_category_cards_{category.replace(' ', '_').replace('/', '_')}"
+        if show_key not in st.session_state:
+            st.session_state[show_key] = False
+
+        display_count = len(category_pools) if st.session_state[show_key] else min(6, len(category_pools))
+        display_pools = category_pools[:display_count]
+        
+        # Display pools in grid using detailed cards
+        for i in range(0, len(display_pools), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                if i + j < len(display_pools):
+                    with cols[j]:
+                        create_pool_card(display_pools[i + j], i + j)
+        
+        # Load more button for this category
+        if len(category_pools) > 6:
+            remaining = len(category_pools) - display_count
+            if remaining > 0:
+                if st.button(f"📥 Show {remaining} More {category} Pools", key=f"load_more_cards_{category.replace(' ', '_')}"):
+                    st.session_state[show_key] = True
+                    st.rerun()
+            elif st.session_state[show_key]:
+                if st.button(f"📤 Show Less {category}", key=f"show_less_cards_{category.replace(' ', '_')}"):
+                    st.session_state[show_key] = False
+                    st.rerun()
+        
+        st.markdown("---")
+
 @st.cache_data(ttl=900)
 def get_news_summary(token, pools=None):
     """Get news summary using EXA API"""
@@ -1525,6 +1794,8 @@ def main():
     tab1, tab2, tab3 = st.tabs(["🎯 Pool Explorer", "📰 Market Intel", "🌱 Trending"])
 
     with tab1:
+        st.markdown("## 🎯 Pool Explorer - Yield Categories")
+        
         if not token:
             st.info("🎯 Ready to Find High Yields? Enter a token symbol above to discover the best DeFi opportunities")
         elif not pools:
@@ -1533,56 +1804,43 @@ def main():
             # Summary Cards
             create_summary_cards(pools)
             
-            # Categorize pools by risk
-            risk_groups = {"Low": [], "High": []}
-            for pool in pools:
-                risk = classify_risk(pool)
-                if risk == "Low":
-                    risk_groups["Low"].append(pool)
+            # Display category selection
+            st.markdown("### 📊 Pool Categories")
+            st.info("""
+            **Yield Pool Recommendation Categories:**
             
-            # Apply special filtering for high-risk pools (top 100 coins only)
-            high_risk_filtered = filter_high_risk_pools(pools)
-            risk_groups["High"] = high_risk_filtered
+            🟢 **Low Risk:**
+            - **Staking and Money Market**: Direct staking and established lending protocols
+            - **LP on Correlated Assets Lending**: Pools with highly correlated assets (USDC/USDT, ETH/WETH)
             
-            # Debug filtering process if enabled
-            debug_high_risk_filtering(pools)
-            test_top_50_filtering()
-
-            # Display pools by risk category
-            for risk_level in ["Low", "High"]:
-                risk_pools = risk_groups[risk_level]
-                if not risk_pools:
-                    continue
-
-                emoji = "🟢" if risk_level == "Low" else "🔴"
-                
-                if risk_level == "High":
-                    st.markdown(f"## {emoji} {risk_level} Risk Pools - Both Tokens Top 50 ({len(risk_pools)} pools)")
-                    st.info(f"🔍 High-risk pools are filtered to only include pools where BOTH tokens are in the top 50 by market cap, sorted by highest APY. Top coins: {get_top_50_coins_display()}")
-                else:
-                    st.markdown(f"## {emoji} {risk_level} Risk Pools ({len(risk_pools)} pools)")
-
-                # Show/hide toggle
-                show_key = f"show_all_{risk_level.lower()}"
-                if show_key not in st.session_state:
-                    st.session_state[show_key] = False
-
-                display_count = len(risk_pools) if st.session_state[show_key] else min(6, len(risk_pools))
-                display_pools = risk_pools[:display_count]
-                
-                display_pools_grid(display_pools, f"{risk_level}_risk")
-                
-                # Load more button
-                if len(risk_pools) > 6:
-                    remaining = len(risk_pools) - display_count
-                    if remaining > 0:
-                        if st.button(f"📥 Show {remaining} More {risk_level} Risk Pools", key=f"load_more_{risk_level}"):
-                            st.session_state[show_key] = True
-                            st.rerun()
-                    elif st.session_state[show_key]:
-                        if st.button(f"📤 Show Less", key=f"show_less_{risk_level}"):
-                            st.session_state[show_key] = False
-                            st.rerun()
+            🟡 **Medium Risk:**
+            - **LP on Uncorrelated Assets Lending (Medium Risk)**: Cross-asset lending with top 50 tokens (ETH/BTC, SOL/AVAX)
+            
+            🔴 **High Risk:**
+            - **LP on Uncorrelated Assets Lending (High Risk)**: Cross-asset lending with non-top 50 tokens
+            - **Vault/Beefy/Pendle AMM**: Advanced yield optimization protocols (Yearn, Beefy, Pendle)
+            - **Other**: Other yield farming strategies and protocols
+            """)
+            
+            # Display mode toggle (CSV vs Cards)
+            if "display_mode" not in st.session_state:
+                st.session_state["display_mode"] = "CSV"
+            
+            display_mode = st.radio(
+                "Display Mode:",
+                ["CSV Tables", "Detailed Cards"],
+                index=0 if st.session_state["display_mode"] == "CSV" else 1,
+                horizontal=True,
+                help="Choose between compact CSV tables or detailed pool cards with DEX data and charts"
+            )
+            st.session_state["display_mode"] = "CSV" if display_mode == "CSV Tables" else "Cards"
+            
+            if display_mode == "CSV Tables":
+                # Use CSV display
+                display_pools_by_recommendation_category(pools)
+            else:
+                # Use detailed card display
+                display_pools_by_recommendation_category_cards(pools)
 
     with tab2:
         st.markdown("## 📰 Market Intelligence")
